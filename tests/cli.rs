@@ -1,0 +1,941 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use serde_json::Value;
+use tempfile::TempDir;
+
+struct Fixture {
+    _temp: TempDir,
+    root: PathBuf,
+    config: PathBuf,
+    canonical: PathBuf,
+    origin: PathBuf,
+}
+
+struct WorkspaceFixture {
+    _temp: TempDir,
+    root: PathBuf,
+}
+
+impl WorkspaceFixture {
+    fn new() -> Self {
+        Self::with_default("main")
+    }
+
+    fn with_default(default_branch: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        for name in ["alpha", "beta", "gamma"] {
+            initialize_repository(&root, name, default_branch);
+        }
+        write_config(&root.join(".forest.toml"), &["alpha", "beta", "gamma"]);
+        Self { _temp: temp, root }
+    }
+
+    fn canonical(&self, name: &str) -> PathBuf {
+        self.root.join("src").join(name)
+    }
+
+    fn workspace(&self, workspace: &str) -> PathBuf {
+        self.root
+            .canonicalize()
+            .unwrap()
+            .join("src/.workspaces")
+            .join(workspace)
+    }
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project with spaces");
+        let repositories = root.join("src");
+        let canonical = repositories.join("alpha");
+        let origin = root.join("alpha-origin.git");
+        fs::create_dir_all(&repositories).unwrap();
+
+        git(
+            &root,
+            &["init", "--bare", "--initial-branch=main", path(&origin)],
+        );
+        git(&root, &["init", "--initial-branch=main", path(&canonical)]);
+        git(&canonical, &["config", "user.name", "Forest Test"]);
+        git(&canonical, &["config", "user.email", "forest@example.com"]);
+        fs::write(canonical.join("README.md"), "alpha\n").unwrap();
+        git(&canonical, &["add", "README.md"]);
+        git(&canonical, &["commit", "-m", "initial"]);
+        git(&canonical, &["remote", "add", "origin", path(&origin)]);
+        git(&canonical, &["push", "-u", "origin", "main"]);
+        git(&canonical, &["remote", "set-head", "origin", "main"]);
+
+        let config = root.join(".forest.toml");
+        write_config(&config, &["alpha", "missing"]);
+
+        Self {
+            _temp: temp,
+            root,
+            config,
+            canonical,
+            origin,
+        }
+    }
+}
+
+#[test]
+fn discovers_config_from_a_canonical_repository_and_reports_repositories() {
+    let fixture = Fixture::new();
+    let nested = fixture.canonical.join("nested/directory");
+    fs::create_dir_all(&nested).unwrap();
+
+    let output = forest(&nested, &["repos", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repositories = report["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), 2);
+    assert_eq!(repositories[0]["name"], "alpha");
+    assert_eq!(
+        repositories[0]["path"],
+        path(&fixture.canonical.canonicalize().unwrap())
+    );
+    assert_eq!(repositories[0]["exists"], true);
+    assert_eq!(repositories[0]["is_git_worktree"], true);
+    assert_eq!(repositories[0]["origin_url"], path(&fixture.origin));
+    assert_eq!(repositories[0]["default_ref"], "refs/remotes/origin/main");
+    assert_eq!(repositories[1]["name"], "missing");
+    assert_eq!(repositories[1]["exists"], false);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn explicit_config_takes_precedence_over_environment() {
+    let fixture = Fixture::new();
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("FOREST_CONFIG", fixture.root.join("does-not-exist.toml"))
+        .args(["--config", path(&fixture.config), "repos", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["name"], "alpha");
+}
+
+#[test]
+fn environment_config_works_outside_the_project_tree() {
+    let fixture = Fixture::new();
+    let outside = fixture._temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+
+    let output = Command::new(binary())
+        .current_dir(outside)
+        .env("FOREST_CONFIG", &fixture.config)
+        .args(["repos", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["name"], "alpha");
+}
+
+#[test]
+fn nested_git_commands_ignore_inherited_repository_environment() {
+    let fixture = Fixture::new();
+    let unrelated = fixture.root.join("unrelated");
+    git(&fixture.root, &["init", path(&unrelated)]);
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.canonical)
+        .env("GIT_DIR", unrelated.join(".git"))
+        .args(["repos", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["is_git_worktree"], true);
+    assert_eq!(
+        report["repositories"][0]["default_ref"],
+        "refs/remotes/origin/main"
+    );
+}
+
+#[test]
+fn discovers_master_as_a_default_without_guessing() {
+    let fixture = WorkspaceFixture::with_default("master");
+
+    let repositories = forest(&fixture.root, &["repos", "--json"]);
+    assert_success(&repositories);
+    let report: Value = serde_json::from_slice(&repositories.stdout).unwrap();
+    assert_eq!(
+        report["repositories"][0]["default_ref"],
+        "refs/remotes/origin/master"
+    );
+
+    let created = forest(&fixture.root, &["create", "legacy", "alpha", "--json"]);
+    assert_success(&created);
+    let expected = git_stdout(
+        &fixture.canonical("alpha"),
+        &["rev-parse", "refs/remotes/origin/master"],
+    );
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("legacy").join("alpha"),
+            &["rev-parse", "HEAD"]
+        ),
+        expected
+    );
+}
+
+#[test]
+fn requires_an_explicit_base_when_origin_head_is_missing() {
+    let fixture = WorkspaceFixture::new();
+    git(
+        &fixture.canonical("alpha"),
+        &["remote", "set-head", "origin", "-d"],
+    );
+
+    let missing = forest(&fixture.root, &["create", "base", "alpha", "--json"]);
+    assert!(!missing.status.success());
+    let report: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--base alpha=<ref>")
+    );
+
+    let explicit = forest(
+        &fixture.root,
+        &[
+            "create",
+            "base",
+            "alpha",
+            "--base",
+            "alpha=refs/remotes/origin/main",
+            "--json",
+        ],
+    );
+    assert_success(&explicit);
+    let report: Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert_eq!(
+        report["repositories"][0]["base_ref"],
+        "refs/remotes/origin/main"
+    );
+}
+
+#[test]
+fn rejects_branch_namespace_conflicts_during_preflight() {
+    let fixture = WorkspaceFixture::new();
+    git(&fixture.canonical("alpha"), &["branch", "test", "main"]);
+
+    let output = forest(&fixture.root, &["create", "namespace", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("conflicts with existing branch test")
+    );
+    assert!(!fixture.workspace("namespace").exists());
+}
+
+#[test]
+fn creates_multiple_worktrees_and_is_idempotent() {
+    let fixture = WorkspaceFixture::new();
+
+    let created = forest(
+        &fixture.root,
+        &["create", "topic", "alpha", "beta", "--json"],
+    );
+    assert_success(&created);
+    let report: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "created");
+    assert_eq!(report["repositories"][1]["status"], "created");
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("topic").join("alpha"),
+            &["branch", "--show-current"]
+        ),
+        "test/topic"
+    );
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("topic").join("beta"),
+            &["branch", "--show-current"]
+        ),
+        "test/topic"
+    );
+
+    let repeated = forest(
+        &fixture.root,
+        &["create", "topic", "alpha", "beta", "--json"],
+    );
+    assert_success(&repeated);
+    let report: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "reused");
+    assert_eq!(report["repositories"][1]["status"], "reused");
+}
+
+#[test]
+fn rejects_stale_registration_pointing_at_a_foreign_repository() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "foreign", "alpha", "--json"],
+    ));
+    let destination = fixture.workspace("foreign").join("alpha");
+    fs::rename(&destination, fixture.root.join("displaced-alpha")).unwrap();
+    git(
+        &fixture.root,
+        &[
+            "init",
+            "--initial-branch=totally-different",
+            path(&destination),
+        ],
+    );
+    git(&destination, &["config", "user.name", "Forest Test"]);
+    git(
+        &destination,
+        &["config", "user.email", "forest@example.com"],
+    );
+    fs::write(destination.join("foreign.txt"), "foreign\n").unwrap();
+    git(&destination, &["add", "foreign.txt"]);
+    git(&destination, &["commit", "-m", "foreign"]);
+
+    let output = forest(&fixture.root, &["create", "foreign", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not belong to canonical repository")
+    );
+    assert_eq!(
+        git_stdout(&destination, &["branch", "--show-current"]),
+        "totally-different"
+    );
+}
+
+#[test]
+fn reports_partial_failure_and_safely_resumes() {
+    let fixture = WorkspaceFixture::new();
+    let fake_bin = fixture.root.join("fake-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        r#"#!/bin/sh
+if [ "$1" = "-C" ] && [ "$2" = "$FAIL_REPO" ] && [ "$3" = "worktree" ] && [ "$4" = "add" ]; then
+  echo "simulated worktree creation failure" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+
+    let partial = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("REAL_GIT", find_executable("git"))
+        .env(
+            "FAIL_REPO",
+            fixture.canonical("beta").canonicalize().unwrap(),
+        )
+        .args(["create", "partial", "alpha", "beta", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!partial.status.success());
+    let report: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "created");
+    assert_eq!(report["repositories"][1]["status"], "failed");
+    assert!(fixture.workspace("partial").join("alpha").exists());
+    assert!(!fixture.workspace("partial").join("beta").exists());
+
+    let resumed = forest(
+        &fixture.root,
+        &["create", "partial", "alpha", "beta", "--json"],
+    );
+    assert_success(&resumed);
+    let report: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "reused");
+    assert_eq!(report["repositories"][1]["status"], "created");
+}
+
+#[test]
+fn adds_a_repository_to_an_existing_workspace() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "alpha", "--json"],
+    ));
+
+    let output = forest(&fixture.root, &["add", "topic", "gamma", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["name"], "gamma");
+    assert_eq!(report["repositories"][0]["status"], "created");
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("topic").join("gamma"),
+            &["branch", "--show-current"]
+        ),
+        "test/topic"
+    );
+}
+
+#[test]
+fn reuses_a_preexisting_branch_that_is_not_checked_out() {
+    let fixture = WorkspaceFixture::new();
+    git(
+        &fixture.canonical("alpha"),
+        &["branch", "test/existing", "main"],
+    );
+
+    let output = forest(&fixture.root, &["create", "existing", "alpha", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["action"], "add_existing_branch");
+    assert_eq!(report["repositories"][0]["base_ref"], Value::Null);
+}
+
+#[test]
+fn preflight_rejects_a_branch_checked_out_elsewhere_without_mutation() {
+    let fixture = WorkspaceFixture::new();
+    let other = fixture.root.join("other-alpha");
+    git(
+        &fixture.canonical("alpha"),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "test/conflict",
+            path(&other),
+            "main",
+        ],
+    );
+
+    let output = forest(
+        &fixture.root,
+        &["create", "conflict", "alpha", "beta", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert_eq!(report["repositories"][1]["status"], "not_run");
+    assert!(!fixture.workspace("conflict").exists());
+}
+
+#[test]
+fn rejects_unknown_repositories_before_mutation() {
+    let fixture = WorkspaceFixture::new();
+
+    let output = forest(
+        &fixture.root,
+        &["create", "unknown", "alpha", "nope", "--json"],
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown repository")
+    );
+    assert_eq!(error["error"]["exit_code"], 2);
+    assert!(!fixture.workspace("unknown").exists());
+}
+
+#[test]
+fn lists_workspaces_and_prints_a_composable_path() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "listed", "alpha", "beta", "--json"],
+    ));
+
+    let listed = forest(&fixture.root, &["list", "--json"]);
+    assert_success(&listed);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(report["workspaces"][0]["name"], "listed");
+    assert_eq!(report["workspaces"][0]["repositories"][0]["name"], "alpha");
+    assert_eq!(
+        report["workspaces"][0]["repositories"][0]["branch"],
+        "test/listed"
+    );
+    assert_eq!(report["workspaces"][0]["repositories"][1]["name"], "beta");
+
+    let path_output = forest(&fixture.root, &["path", "listed"]);
+    assert_success(&path_output);
+    assert_eq!(
+        String::from_utf8(path_output.stdout).unwrap(),
+        format!("{}\n", fixture.workspace("listed").display())
+    );
+    assert!(path_output.stderr.is_empty());
+
+    let json_path = forest(&fixture.root, &["path", "listed", "--json"]);
+    assert_success(&json_path);
+    let report: Value = serde_json::from_slice(&json_path.stdout).unwrap();
+    assert_eq!(report["workspace"], "listed");
+    assert_eq!(report["path"], path(&fixture.workspace("listed")));
+
+    let from_worktree = forest(
+        &fixture.workspace("listed").join("alpha"),
+        &["status", "listed", "--json"],
+    );
+    assert_success(&from_worktree);
+    let report: Value = serde_json::from_slice(&from_worktree.stdout).unwrap();
+    assert_eq!(report["workspaces"][0]["name"], "listed");
+}
+
+#[test]
+fn reports_dirty_ahead_behind_and_detached_status() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "state", "alpha", "beta", "--json"],
+    ));
+    let alpha = fixture.workspace("state").join("alpha");
+    let beta = fixture.workspace("state").join("beta");
+
+    let clean = forest(&fixture.root, &["status", "state", "--json"]);
+    assert_success(&clean);
+    let clean: Value = serde_json::from_slice(&clean.stdout).unwrap();
+    assert_eq!(clean["workspaces"][0]["repositories"][0]["dirty"], false);
+
+    git(&alpha, &["branch", "--set-upstream-to=origin/main"]);
+    fs::write(alpha.join("feature.txt"), "feature\n").unwrap();
+    git(&alpha, &["add", "feature.txt"]);
+    git(&alpha, &["commit", "-m", "feature"]);
+    fs::write(alpha.join("untracked.txt"), "untracked\n").unwrap();
+
+    let canonical = fixture.canonical("alpha");
+    fs::write(canonical.join("main.txt"), "main\n").unwrap();
+    git(&canonical, &["add", "main.txt"]);
+    git(&canonical, &["commit", "-m", "advance main"]);
+    git(&canonical, &["push", "origin", "main"]);
+    git(&beta, &["checkout", "--detach"]);
+
+    let output = forest(&fixture.root, &["status", "state", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repositories = report["workspaces"][0]["repositories"].as_array().unwrap();
+    assert_eq!(repositories[0]["name"], "alpha");
+    assert_eq!(repositories[0]["branch"], "test/state");
+    assert_eq!(repositories[0]["dirty"], true);
+    assert_eq!(repositories[0]["upstream"], "origin/main");
+    assert_eq!(repositories[0]["ahead"], 1);
+    assert_eq!(repositories[0]["behind"], 1);
+    assert_eq!(repositories[1]["name"], "beta");
+    assert_eq!(repositories[1]["branch"], Value::Null);
+    assert_eq!(repositories[1]["detached"], true);
+}
+
+#[test]
+fn does_not_treat_a_nested_plain_directory_as_a_git_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("parent-repository");
+    fs::create_dir_all(root.join("src/plain")).unwrap();
+    git(&root, &["init"]);
+    write_config(&root.join(".forest.toml"), &["plain"]);
+
+    let output = forest(&root, &["repos", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["exists"], true);
+    assert_eq!(report["repositories"][0]["is_git_worktree"], false);
+}
+
+#[test]
+fn refuses_dirty_removal_before_removing_any_member() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "dirty", "alpha", "beta", "--json"],
+    ));
+    fs::write(
+        fixture.workspace("dirty").join("alpha/untracked.txt"),
+        "dirty\n",
+    )
+    .unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["remove", "dirty", "alpha", "beta", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert_eq!(report["repositories"][1]["status"], "not_run");
+    assert!(fixture.workspace("dirty").join("alpha").exists());
+    assert!(fixture.workspace("dirty").join("beta").exists());
+}
+
+#[test]
+fn refuses_removal_when_a_tracked_file_is_modified() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "modified", "alpha", "--json"],
+    ));
+    let worktree = fixture.workspace("modified").join("alpha");
+    fs::write(worktree.join("README.md"), "modified\n").unwrap();
+
+    let output = forest(&fixture.root, &["remove", "modified", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("modified")
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "modified\n"
+    );
+}
+
+#[test]
+fn refuses_removal_of_a_worktree_moved_to_an_unexpected_path() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "moved", "alpha", "--json"],
+    ));
+    let expected = fixture.workspace("moved").join("alpha");
+    let actual = fixture.workspace("moved").join("renamed");
+    git(
+        &fixture.canonical("alpha"),
+        &["worktree", "move", path(&expected), path(&actual)],
+    );
+
+    let listed = forest(&fixture.root, &["list", "--json"]);
+    assert_success(&listed);
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let repository = &listed["workspaces"][0]["repositories"][0];
+    assert_eq!(repository["name"], "alpha");
+    assert_eq!(repository["path"], path(&actual));
+    assert_eq!(repository["registered"], true);
+
+    let output = forest(&fixture.root, &["remove", "moved", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert_eq!(report["repositories"][0]["path"], path(&actual));
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("registered worktree layout does not match")
+    );
+    assert!(actual.exists());
+    assert!(
+        git_stdout(
+            &fixture.canonical("alpha"),
+            &["worktree", "list", "--porcelain"]
+        )
+        .contains(path(&actual))
+    );
+}
+
+#[test]
+fn refuses_removal_when_only_ignored_files_are_present() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "ignored", "alpha", "--json"],
+    ));
+    fs::write(
+        fixture.canonical("alpha").join(".git/info/exclude"),
+        "ignored.txt\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.workspace("ignored").join("alpha/ignored.txt"),
+        "keep\n",
+    )
+    .unwrap();
+
+    let output = forest(&fixture.root, &["remove", "ignored", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        fixture
+            .workspace("ignored")
+            .join("alpha/ignored.txt")
+            .exists()
+    );
+}
+
+#[test]
+fn removes_clean_worktrees_preserves_branches_and_is_rerunnable() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "remove", "alpha", "beta", "--json"],
+    ));
+
+    let output = forest(&fixture.root, &["remove", "remove", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "removed");
+    assert_eq!(report["repositories"][1]["status"], "removed");
+    assert_eq!(report["workspace_removed"], true);
+    assert!(!fixture.workspace("remove").exists());
+    for name in ["alpha", "beta"] {
+        git(
+            &fixture.canonical(name),
+            &["show-ref", "--verify", "--quiet", "refs/heads/test/remove"],
+        );
+    }
+
+    let repeated = forest(&fixture.root, &["remove", "remove", "alpha", "--json"]);
+    assert_success(&repeated);
+    let report: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "already_absent");
+}
+
+#[test]
+fn removes_only_explicitly_selected_members() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "subset", "alpha", "beta", "--json"],
+    ));
+
+    let output = forest(&fixture.root, &["remove", "subset", "alpha", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "removed");
+    assert_eq!(report["workspace_removed"], false);
+    assert!(!fixture.workspace("subset").join("alpha").exists());
+    assert!(fixture.workspace("subset").join("beta").exists());
+}
+
+#[test]
+fn preserves_unexpected_workspace_files_on_removal() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "preserve", "alpha", "--json"],
+    ));
+    let note = fixture.workspace("preserve").join("notes.txt");
+    fs::write(&note, "keep\n").unwrap();
+
+    let output = forest(&fixture.root, &["remove", "preserve", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "removed");
+    assert_eq!(report["workspace_removed"], false);
+    assert_eq!(report["remaining_entries"][0], path(&note));
+    assert!(note.exists());
+}
+
+#[test]
+fn rejects_a_conflicting_destination_path() {
+    let fixture = WorkspaceFixture::new();
+    let destination = fixture.workspace("occupied").join("alpha");
+    fs::create_dir_all(&destination).unwrap();
+    fs::write(destination.join("keep.txt"), "keep\n").unwrap();
+
+    let output = forest(&fixture.root, &["create", "occupied", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(destination.join("keep.txt").exists());
+}
+
+#[test]
+fn emits_json_for_usage_errors_when_requested() {
+    let output = Command::new(binary())
+        .args(["create", "missing-repositories", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["exit_code"], 2);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("required arguments were not provided")
+    );
+}
+
+#[test]
+fn direct_and_git_subcommand_invocations_match() {
+    let fixture = Fixture::new();
+    let direct = forest(&fixture.canonical, &["repos", "--json"]);
+    assert_success(&direct);
+
+    let bin_dir = fixture.root.join("bin");
+    fs::create_dir(&bin_dir).unwrap();
+    fs::copy(binary(), bin_dir.join("git-forest")).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+    let through_git = Command::new("git")
+        .current_dir(&fixture.canonical)
+        .env("PATH", command_path)
+        .args(["forest", "repos", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&through_git);
+    assert_eq!(through_git.stdout, direct.stdout);
+    assert_eq!(through_git.stderr, direct.stderr);
+}
+
+fn initialize_repository(root: &Path, name: &str, default_branch: &str) {
+    let canonical = root.join("src").join(name);
+    let origin = root.join(format!("{name}-origin.git"));
+    git(
+        root,
+        &[
+            "init",
+            "--bare",
+            &format!("--initial-branch={default_branch}"),
+            path(&origin),
+        ],
+    );
+    git(
+        root,
+        &[
+            "init",
+            &format!("--initial-branch={default_branch}"),
+            path(&canonical),
+        ],
+    );
+    git(&canonical, &["config", "user.name", "Forest Test"]);
+    git(&canonical, &["config", "user.email", "forest@example.com"]);
+    fs::write(canonical.join("README.md"), format!("{name}\n")).unwrap();
+    git(&canonical, &["add", "README.md"]);
+    git(&canonical, &["commit", "-m", "initial"]);
+    git(&canonical, &["remote", "add", "origin", path(&origin)]);
+    git(&canonical, &["push", "-u", "origin", default_branch]);
+    git(
+        &canonical,
+        &["remote", "set-head", "origin", default_branch],
+    );
+}
+
+fn write_config(path: &Path, members: &[&str]) {
+    let members = members
+        .iter()
+        .map(|member| format!("  {member:?},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        path,
+        format!(
+            r#"version = 1
+
+[repositories]
+root = "src"
+remote = "git@example.com:{{name}}.git"
+members = [
+{members}
+]
+
+[workspaces]
+root = "src/.workspaces"
+branch = "test/{{workspace}}"
+"#,
+        ),
+    )
+    .unwrap();
+}
+
+fn forest(current_dir: &Path, arguments: &[&str]) -> Output {
+    Command::new(binary())
+        .current_dir(current_dir)
+        .env_remove("FOREST_CONFIG")
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+fn binary() -> &'static str {
+    env!("CARGO_BIN_EXE_git-forest")
+}
+
+fn git(current_dir: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(current_dir)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert_success(&output);
+}
+
+fn git_stdout(current_dir: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(current_dir)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn find_executable(name: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("could not find {name} on PATH"))
+}
+
+fn path(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
