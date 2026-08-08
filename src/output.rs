@@ -3,8 +3,9 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::domain::{
-    ChangeAction, ChangeStatus, CommandReport, RemovalStatus, RepositoriesReport,
-    WorkspaceChangeReport, WorkspaceListEntry, WorkspaceRemovalReport, WorkspaceStatusEntry,
+    ChangeAction, ChangeStatus, CommandReport, FetchStatus, RemovalStatus, RepositoriesFetchReport,
+    RepositoriesReport, WorkspaceChangeReport, WorkspaceListEntry, WorkspaceRemovalReport,
+    WorkspaceStatusEntry,
 };
 use crate::error::{AppError, Result};
 
@@ -96,6 +97,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
     if json {
         match report {
             CommandReport::Repositories(report) => render_json(&mut writer, report)?,
+            CommandReport::RepositoriesFetch(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceChange(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesList(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
@@ -108,6 +110,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
 
     match report {
         CommandReport::Repositories(report) => render_repositories(&mut writer, report, styles),
+        CommandReport::RepositoriesFetch(report) => {
+            render_repositories_fetch(&mut writer, report, styles)
+        }
         CommandReport::WorkspaceChange(report) => {
             render_workspace_change(&mut writer, report, styles)
         }
@@ -221,6 +226,43 @@ fn render_repositories(
                 repository.default_ref.as_deref().unwrap_or("—"),
                 styles,
             )?;
+        }
+    }
+    Ok(())
+}
+
+fn render_repositories_fetch(
+    writer: &mut impl Write,
+    report: &RepositoriesFetchReport,
+    styles: Styles,
+) -> Result<()> {
+    writeln!(writer, "{}Fetch origin{}", styles.bold(), styles.reset())
+        .map_err(AppError::WriteOutput)?;
+    writeln!(writer).map_err(AppError::WriteOutput)?;
+
+    let name_width = report
+        .repositories
+        .iter()
+        .map(|repository| repository.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for repository in &report.repositories {
+        let (status, symbol, color) = match repository.status {
+            FetchStatus::Fetched => ("fetched", "✓", styles.green()),
+            FetchStatus::Failed => ("failed", "✗", styles.red()),
+        };
+        writeln!(
+            writer,
+            "  {color}{symbol}{} {}{:name_width$}{}  {color}{status}{}",
+            styles.reset(),
+            styles.bold(),
+            repository.name,
+            styles.reset(),
+            styles.reset(),
+        )
+        .map_err(AppError::WriteOutput)?;
+        if let Some(message) = &repository.message {
+            render_message(writer, message, styles)?;
         }
     }
     Ok(())

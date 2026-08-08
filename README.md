@@ -8,9 +8,10 @@ git-forest <command>
 git forest <command>
 ```
 
-The tool is non-interactive. It does not fetch, clone, delete branches, manage
-runtime resources, start tmux, or maintain a separate worktree registry. Git
-worktree metadata and the filesystem are authoritative.
+The tool is non-interactive. It contacts remotes only for an explicit `fetch`
+command. It does not clone, delete branches, manage runtime resources, start
+tmux, or maintain a separate worktree registry. Git worktree metadata and the
+filesystem are authoritative.
 
 ## Installation
 
@@ -89,6 +90,7 @@ valid names.
 
 ```text
 git forest repos [--json]
+git forest fetch [<repository>...] [--json]
 git forest create <workspace> <repository>... [--base <repository>=<ref>]... [--json]
 git forest add <workspace> <repository>... [--base <repository>=<ref>]... [--json]
 git forest list [--json]
@@ -114,6 +116,22 @@ reports the origin URL and the default ref when available.
 The default base is discovered exclusively through the symbolic ref
 `refs/remotes/origin/HEAD`. The command never guesses `main` or `master` and
 never contacts a remote to repair a missing default.
+
+### `fetch`
+
+Fetches `origin` for every configured canonical repository. Pass repository
+names to fetch only a subset. The command attempts every selected repository
+and exits unsuccessfully if any fetch fails.
+
+This is the only command that contacts remotes. It updates remote-tracking refs,
+including the `origin/HEAD` target used as the default creation base, but does
+not merge, reset, or otherwise update local branches or worktrees. To create a
+workspace from the latest fetched defaults:
+
+```sh
+git forest fetch
+git forest create logical-slots api operator
+```
 
 ### `create` and `add`
 
@@ -217,6 +235,23 @@ omitted.
   ]
 }
 ```
+
+### Fetch
+
+```json
+{
+  "repositories": [
+    {
+      "name": "api",
+      "path": "/project/src/api",
+      "status": "fetched",
+      "message": null
+    }
+  ]
+}
+```
+
+Fetch status is `fetched` or `failed`.
 
 ### Create and add
 

@@ -1,4 +1,5 @@
 mod create;
+mod fetch;
 mod list;
 mod path;
 mod remove;
@@ -16,6 +17,7 @@ pub fn run(cli: &Cli, config: &Config, git: &Git) -> Result<CommandOutcome> {
         Command::Repos(_) => repos::run(config, git)
             .map(CommandReport::Repositories)
             .map(CommandOutcome::success),
+        Command::Fetch(arguments) => fetch::run(config, git, arguments),
         Command::Create(arguments) => create::run(config, git, arguments, false),
         Command::Add(arguments) => create::run(config, git, arguments, true),
         Command::List(_) => list::run(config, git)

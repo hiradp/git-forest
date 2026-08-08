@@ -19,6 +19,9 @@ pub enum Command {
     /// List configured repositories
     Repos(OutputArgs),
 
+    /// Fetch origin for configured repositories
+    Fetch(FetchArgs),
+
     /// Create a workspace and its linked worktrees
     Create(CreateArgs),
 
@@ -42,6 +45,7 @@ impl Command {
     pub fn json(&self) -> bool {
         match self {
             Self::Repos(args) | Self::List(args) => args.json,
+            Self::Fetch(args) => args.output.json,
             Self::Create(args) | Self::Add(args) => args.output.json,
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
@@ -55,6 +59,15 @@ pub struct OutputArgs {
     /// Emit structured JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FetchArgs {
+    /// Configured repository names; fetch all when omitted
+    pub repositories: Vec<String>,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
 }
 
 #[derive(Debug, Args)]

@@ -166,6 +166,75 @@ fn nested_git_commands_ignore_inherited_repository_environment() {
 }
 
 #[test]
+fn fetches_all_origins_before_creating_a_workspace() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    let original = git_stdout(&canonical, &["rev-parse", "main"]);
+    let publisher = fixture.root.join("alpha-publisher");
+    let origin = fixture.root.join("alpha-origin.git");
+    git(&fixture.root, &["clone", path(&origin), path(&publisher)]);
+    git(&publisher, &["config", "user.name", "Forest Test"]);
+    git(&publisher, &["config", "user.email", "forest@example.com"]);
+    fs::write(publisher.join("published.txt"), "published\n").unwrap();
+    git(&publisher, &["add", "published.txt"]);
+    git(&publisher, &["commit", "-m", "published"]);
+    git(&publisher, &["push", "origin", "main"]);
+    let published = git_stdout(&publisher, &["rev-parse", "HEAD"]);
+
+    assert_eq!(
+        git_stdout(&canonical, &["rev-parse", "refs/remotes/origin/main"]),
+        original
+    );
+
+    let fetched = forest(&fixture.root, &["fetch", "--json"]);
+
+    assert_success(&fetched);
+    let report: Value = serde_json::from_slice(&fetched.stdout).unwrap();
+    let repositories = report["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), 3);
+    assert!(
+        repositories
+            .iter()
+            .all(|repository| repository["status"] == "fetched")
+    );
+    assert_eq!(
+        git_stdout(&canonical, &["rev-parse", "refs/remotes/origin/main"]),
+        published
+    );
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), original);
+
+    let created = forest(&fixture.root, &["create", "fresh", "alpha", "--json"]);
+    assert_success(&created);
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("fresh").join("alpha"),
+            &["rev-parse", "HEAD"]
+        ),
+        published
+    );
+}
+
+#[test]
+fn reports_fetch_failures_without_skipping_other_repositories() {
+    let fixture = Fixture::new();
+
+    let output = forest(&fixture.root, &["fetch", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["name"], "alpha");
+    assert_eq!(report["repositories"][0]["status"], "fetched");
+    assert_eq!(report["repositories"][1]["name"], "missing");
+    assert_eq!(report["repositories"][1]["status"], "failed");
+    assert!(
+        report["repositories"][1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist")
+    );
+}
+
+#[test]
 fn discovers_master_as_a_default_without_guessing() {
     let fixture = WorkspaceFixture::with_default("master");
 

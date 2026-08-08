@@ -285,6 +285,13 @@ impl Git {
         Ok(Ok(status.stdout.is_empty()))
     }
 
+    pub fn fetch_origin(&self, repository: &Path) -> Result<Output> {
+        self.run(
+            repository,
+            ["fetch", "--quiet", "--no-recurse-submodules", "origin"],
+        )
+    }
+
     pub fn remove_worktree(&self, repository: &Path, worktree: &Path) -> Result<Output> {
         self.run(
             repository,
