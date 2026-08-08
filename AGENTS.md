@@ -40,10 +40,19 @@ than printing directly.
 Run all gates before considering a change complete:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+just check
+just test
 ```
 
-Tests must use temporary repositories and local bare origins. Do not depend on
-network access, global Git identity, or the developer's real repositories.
+`just check` applies formatting and Clippy fixes before validating the tree, so
+review its diff. Tests must use temporary repositories and local bare origins.
+Do not depend on network access, global Git identity, or the developer's real
+repositories.
+
+The equivalent non-mutating CI gates are:
+
+```sh
+cargo fmt --all --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+```

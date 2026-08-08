@@ -14,10 +14,31 @@ worktree metadata and the filesystem are authoritative.
 
 ## Installation
 
-During local development:
+The project currently tests Linux and macOS. Building from source requires Git
+and [Rust](https://rustup.rs/); the repository pins its Rust toolchain in
+`rust-toolchain.toml`.
+
+Clone the repository and install the binary with Cargo:
 
 ```sh
-cargo install --path . --force
+git clone https://github.com/hiradp/git-forest.git
+cd git-forest
+cargo install --locked --path .
+```
+
+The [`just`](https://just.systems/) development recipes provide an equivalent
+install command that forces replacement of an existing installation:
+
+```sh
+just install
+```
+
+Both commands install into Cargo's binary directory (normally
+`$CARGO_HOME/bin`, which must be on `PATH`). Set `CARGO_INSTALL_ROOT` to choose
+another installation prefix:
+
+```sh
+CARGO_INSTALL_ROOT="$HOME/.local" just install
 ```
 
 ## Configuration
@@ -52,8 +73,7 @@ The only supported placeholders are:
 
 When present, the remote template must contain `{name}`; the branch template
 must contain `{workspace}`. Unknown placeholders, duplicate members, absolute
-roots, and unsupported
-configuration versions are rejected.
+roots, and unsupported configuration versions are rejected.
 
 Configuration precedence is:
 
@@ -323,7 +343,10 @@ The test suite creates temporary repositories and local bare origins. It does
 not require network access or the developer's Git identity.
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+just check  # apply formatting and Clippy fixes, then validate the tree
+just test   # run all tests
 ```
+
+## License
+
+Copyright (c) 2026 Hirad Pourtahmasbi. Licensed under the [MIT License](LICENSE).
