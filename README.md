@@ -362,6 +362,17 @@ just check  # apply formatting and Clippy fixes, then validate the tree
 just test   # run all tests
 ```
 
+`just check` is intentionally allowed to update tracked files. CI runs the
+non-mutating formatting and Clippy checks plus tests on fixed Linux and macOS
+runner images. All Cargo commands in automation use the committed lockfile.
+
+## Security
+
+The security workflow audits `Cargo.lock` with RustSec, reviews dependency
+changes on pull requests, and rejects workflow actions that are not pinned to a
+full commit SHA. Dependabot proposes weekly Cargo and GitHub Actions updates.
+See [SECURITY.md](SECURITY.md) for private vulnerability reporting.
+
 ## License
 
 Copyright (c) 2026 Hirad Pourtahmasbi. Licensed under the [MIT License](LICENSE).

@@ -56,3 +56,15 @@ cargo fmt --all --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
+
+## Automation and supply chain
+
+- Keep `rust-toolchain.toml` and `Cargo.lock` committed. Use `--locked` for all
+  dependency-resolving Cargo commands in CI.
+- Pin every external GitHub Actions `uses:` reference to a full 40-character
+  commit SHA and retain a release comment beside it. Never use a floating tag,
+  branch, or mutable Docker tag.
+- Use fixed hosted-runner labels rather than `*-latest`, least-privilege job
+  permissions, explicit timeouts, and checkout with credential persistence
+  disabled.
+- Update action pins and dependencies through reviewed Dependabot pull requests.
