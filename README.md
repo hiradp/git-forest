@@ -139,6 +139,21 @@ Preflight conflicts prevent all mutation. If Git fails after earlier
 repositories have been created, successful worktrees are preserved and later
 repositories are marked as not run. Repeating the command resumes safely.
 
+Human output keeps shared workspace details in one header and summarizes each
+repository on a compact result line:
+
+```text
+Workspace  logical-slots
+Path       /project/src/.workspaces/logical-slots
+Branch     user/logical-slots
+
+  ✓ api       created  new branch
+  ✓ operator  reused
+```
+
+Colors are enabled only when stdout is a terminal and can be disabled with
+`NO_COLOR`. Use `--json` when every report field is needed.
+
 ### `list` and `status`
 
 `list` reconciles workspace directories with every canonical repository's Git
