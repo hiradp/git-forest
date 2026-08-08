@@ -9,9 +9,10 @@ git forest <command>
 ```
 
 The tool is non-interactive. It contacts remotes only for an explicit `fetch`
-command. It does not clone, delete branches, manage runtime resources, start
-tmux, or maintain a separate worktree registry. Git worktree metadata and the
-filesystem are authoritative.
+command. It does not clone, delete branches, start runtime services, or maintain
+a separate worktree registry. Git worktree metadata and the filesystem are
+authoritative. The explicit `attach` command can create or focus a workspace in
+a running [Herdr](https://herdr.dev) session.
 
 ## Installation
 
@@ -96,6 +97,7 @@ git forest add <workspace> <repository>... [--base <repository>=<ref>]... [--bra
 git forest list [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
+git forest attach <workspace> [--json]
 git forest remove <workspace> [<repository>...] [--json]
 ```
 
@@ -213,6 +215,44 @@ tmux-sessionizer "$workspace" logical-slots
 ```
 
 The workspace must exist.
+
+### `attach`
+
+Opens an existing Forest workspace in Herdr. The `herdr` executable must be on
+`PATH`, and a Herdr server for the current session must already be running.
+Forest never starts or stops the server.
+
+The layout is intentionally fixed. It contains one shell pane per tab and does
+not start commands:
+
+- on initial attachment, `1-main` starts in the Forest workspace root;
+- each present, registered repository gets a tab rooted in its worktree;
+- repository tabs are initially created in configuration order;
+- each managed tab's numeric prefix matches its current Herdr tab position,
+  such as `2-api` and `3-operator`.
+
+Forest records the canonical workspace path in Herdr's runtime metadata. A
+later attachment with one matching Herdr workspace reuses it, creates missing
+managed tabs at the end, repairs managed tab names from their current Herdr tab
+positions, and focuses the managed main tab. Existing managed and unmanaged
+tabs retain their positions, and additional panes are preserved. Multiple
+matches are rejected rather than guessed.
+
+Attachment does not create worktrees or otherwise change Git state. A workspace
+with inconsistent configured worktrees is rejected. Removing a Forest
+workspace does not close its Herdr workspace or processes.
+
+Human output summarizes the Herdr workspace and each managed tab:
+
+```text
+Workspace  logical-slots
+Path       /project/src/.workspaces/logical-slots
+Herdr      w1
+
+  ✓ 1-main      created  /project/src/.workspaces/logical-slots
+  ✓ 2-api       created  /project/src/.workspaces/logical-slots/api
+  ✓ 3-operator  created  /project/src/.workspaces/logical-slots/operator
+```
 
 ### `remove`
 
@@ -363,6 +403,33 @@ in `base_ref`. `status` is `reused`, `created`, `conflict`, `failed`, or
 }
 ```
 
+### Attach
+
+```json
+{
+  "workspace": "logical-slots",
+  "path": "/project/src/.workspaces/logical-slots",
+  "herdr_workspace_id": "w1",
+  "status": "created",
+  "tabs": [
+    {
+      "label": "1-main",
+      "path": "/project/src/.workspaces/logical-slots",
+      "herdr_tab_id": "w1:t1",
+      "status": "created"
+    },
+    {
+      "label": "2-api",
+      "path": "/project/src/.workspaces/logical-slots/api",
+      "herdr_tab_id": "w1:t2",
+      "status": "created"
+    }
+  ]
+}
+```
+
+Workspace and tab status is one of `created`, `reused`, or `reconciled`.
+
 ### Remove
 
 ```json
@@ -402,7 +469,7 @@ for every requested repository.
 ## Exit status
 
 - `0`: successful, including fully idempotent operations;
-- `1`: an operational conflict or Git/filesystem failure;
+- `1`: an operational conflict or Git, Herdr, or filesystem failure;
 - `2`: usage, input, or configuration error.
 
 ## Development

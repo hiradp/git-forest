@@ -37,6 +37,9 @@ pub enum Command {
     /// Print a workspace path
     Path(PathArgs),
 
+    /// Open a workspace in Herdr
+    Attach(AttachArgs),
+
     /// Remove worktrees from a workspace
     Remove(RemoveArgs),
 }
@@ -49,6 +52,7 @@ impl Command {
             Self::Create(args) | Self::Add(args) => args.output.json,
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
+            Self::Attach(args) => args.output.json,
             Self::Remove(args) => args.output.json,
         }
     }
@@ -158,6 +162,15 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct PathArgs {
+    pub workspace: String,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AttachArgs {
+    /// Workspace name
     pub workspace: String,
 
     #[command(flatten)]

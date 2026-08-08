@@ -3,9 +3,9 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::domain::{
-    ChangeAction, ChangeStatus, CommandReport, FetchStatus, RemovalStatus, RepositoriesFetchReport,
-    RepositoriesReport, WorkspaceChangeReport, WorkspaceListEntry, WorkspaceRemovalReport,
-    WorkspaceStatusEntry,
+    AttachStatus, ChangeAction, ChangeStatus, CommandReport, FetchStatus, RemovalStatus,
+    RepositoriesFetchReport, RepositoriesReport, WorkspaceAttachReport, WorkspaceChangeReport,
+    WorkspaceListEntry, WorkspaceRemovalReport, WorkspaceStatusEntry,
 };
 use crate::error::{AppError, Result};
 
@@ -102,6 +102,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::WorkspacesList(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacePath(report) => render_json(&mut writer, report)?,
+            CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRemoval(report) => render_json(&mut writer, report)?,
         }
         writeln!(writer).map_err(AppError::WriteOutput)?;
@@ -154,6 +155,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         }
         CommandReport::WorkspacePath(report) => {
             writeln!(writer, "{}", report.path.display()).map_err(AppError::WriteOutput)
+        }
+        CommandReport::WorkspaceAttach(report) => {
+            render_workspace_attach(&mut writer, report, styles)
         }
         CommandReport::WorkspaceRemoval(report) => {
             render_workspace_removal(&mut writer, report, styles)
@@ -541,6 +545,59 @@ fn render_workspace_status(
     Ok(())
 }
 
+fn render_workspace_attach(
+    writer: &mut impl Write,
+    report: &WorkspaceAttachReport,
+    styles: Styles,
+) -> Result<()> {
+    render_header_field(
+        writer,
+        "Workspace",
+        &report.workspace,
+        styles.bold(),
+        styles,
+    )?;
+    render_header_field(writer, "Path", report.path.display(), "", styles)?;
+    render_header_field(
+        writer,
+        "Herdr",
+        &report.herdr_workspace_id,
+        styles.cyan(),
+        styles,
+    )?;
+    writeln!(writer).map_err(AppError::WriteOutput)?;
+
+    let label_width = report
+        .tabs
+        .iter()
+        .map(|tab| tab.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let status_width = report
+        .tabs
+        .iter()
+        .map(|tab| attach_status_name(tab.status).chars().count())
+        .max()
+        .unwrap_or(0);
+    for tab in &report.tabs {
+        let status = attach_status_name(tab.status);
+        writeln!(
+            writer,
+            "  {}✓{} {}{:label_width$}{}  {}{status:<status_width$}{}  {}",
+            styles.green(),
+            styles.reset(),
+            styles.bold(),
+            tab.label,
+            styles.reset(),
+            styles.green(),
+            styles.reset(),
+            tab.path.display(),
+        )
+        .map_err(AppError::WriteOutput)?;
+    }
+    Ok(())
+}
+
 fn render_workspace_removal(
     writer: &mut impl Write,
     report: &WorkspaceRemovalReport,
@@ -741,6 +798,14 @@ fn change_status_style(status: ChangeStatus, styles: Styles) -> (&'static str, &
     }
 }
 
+fn attach_status_name(status: AttachStatus) -> &'static str {
+    match status {
+        AttachStatus::Created => "created",
+        AttachStatus::Reused => "reused",
+        AttachStatus::Reconciled => "reconciled",
+    }
+}
+
 fn removal_status_name(status: RemovalStatus) -> &'static str {
     match status {
         RemovalStatus::Removed => "removed",
@@ -764,7 +829,46 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::RepositoryChangeReport;
+    use crate::domain::{AttachedTabReport, RepositoryChangeReport};
+
+    #[test]
+    fn renders_workspace_attachment_as_a_compact_summary() {
+        let report = WorkspaceAttachReport {
+            workspace: "topic".to_owned(),
+            path: PathBuf::from("/workspaces/topic"),
+            herdr_workspace_id: "w1".to_owned(),
+            status: AttachStatus::Reconciled,
+            tabs: vec![
+                AttachedTabReport {
+                    label: "1-main".to_owned(),
+                    path: PathBuf::from("/workspaces/topic"),
+                    herdr_tab_id: "w1:t1".to_owned(),
+                    status: AttachStatus::Reused,
+                },
+                AttachedTabReport {
+                    label: "2-alpha".to_owned(),
+                    path: PathBuf::from("/workspaces/topic/alpha"),
+                    herdr_tab_id: "w1:t2".to_owned(),
+                    status: AttachStatus::Reconciled,
+                },
+            ],
+        };
+        let mut output = Vec::new();
+
+        render_workspace_attach(&mut output, &report, Styles { enabled: false }).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "Workspace  topic\n",
+                "Path       /workspaces/topic\n",
+                "Herdr      w1\n",
+                "\n",
+                "  ✓ 1-main   reused      /workspaces/topic\n",
+                "  ✓ 2-alpha  reconciled  /workspaces/topic/alpha\n",
+            )
+        );
+    }
 
     #[test]
     fn renders_workspace_changes_as_a_compact_summary() {

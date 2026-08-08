@@ -4,7 +4,7 @@ use std::process::{Command, Output};
 
 use crate::error::{AppError, Result};
 
-const REPOSITORY_ENVIRONMENT: &[&str] = &[
+pub(crate) const REPOSITORY_ENVIRONMENT: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_DIR",

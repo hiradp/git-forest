@@ -4,6 +4,7 @@ mod config;
 mod domain;
 mod error;
 mod git;
+mod herdr;
 mod output;
 mod workspace;
 
@@ -15,6 +16,7 @@ use crate::cli::Cli;
 use crate::config::Config;
 use crate::error::Result;
 use crate::git::Git;
+use crate::herdr::Herdr;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -48,7 +50,7 @@ fn main() -> ExitCode {
 fn run(cli: &Cli) -> Result<u8> {
     let json = cli.command.json();
     let config = Config::load(cli.config.as_deref())?;
-    let outcome = commands::run(cli, &config, &Git)?;
+    let outcome = commands::run(cli, &config, &Git, &Herdr)?;
     output::render(&outcome.report, json)?;
     Ok(outcome.exit_code)
 }

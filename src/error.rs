@@ -43,6 +43,19 @@ pub enum AppError {
     #[error("{context}: {message}")]
     Git { context: String, message: String },
 
+    #[error("Herdr command failed to start: {0}")]
+    StartHerdr(#[source] std::io::Error),
+
+    #[error("{context}: {message}")]
+    Herdr { context: String, message: String },
+
+    #[error("{context}: could not parse Herdr response: {source}")]
+    ParseHerdr {
+        context: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("{0}")]
     Operational(String),
 

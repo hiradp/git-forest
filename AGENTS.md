@@ -26,6 +26,7 @@ configured canonical repositories.
 - `src/cli.rs`: command-line syntax only.
 - `src/config.rs`: discovery, TOML parsing, templates, and path policy.
 - `src/git.rs`: all Git subprocess invocation and porcelain parsing.
+- `src/herdr.rs`: Herdr subprocess invocation and JSON response parsing.
 - `src/workspace.rs`: reconciliation of filesystem and Git worktree state.
 - `src/domain.rs`: serializable reports.
 - `src/output.rs`: human and JSON rendering.

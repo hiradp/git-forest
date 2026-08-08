@@ -137,6 +137,31 @@ pub struct WorkspacePathReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WorkspaceAttachReport {
+    pub workspace: String,
+    pub path: PathBuf,
+    pub herdr_workspace_id: String,
+    pub status: AttachStatus,
+    pub tabs: Vec<AttachedTabReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttachedTabReport {
+    pub label: String,
+    pub path: PathBuf,
+    pub herdr_tab_id: String,
+    pub status: AttachStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachStatus {
+    Created,
+    Reused,
+    Reconciled,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorkspaceRemovalReport {
     pub workspace: String,
     pub path: PathBuf,
@@ -186,5 +211,6 @@ pub enum CommandReport {
     WorkspacesList(WorkspacesListReport),
     WorkspacesStatus(WorkspacesStatusReport),
     WorkspacePath(WorkspacePathReport),
+    WorkspaceAttach(WorkspaceAttachReport),
     WorkspaceRemoval(WorkspaceRemovalReport),
 }
