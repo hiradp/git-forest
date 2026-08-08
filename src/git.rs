@@ -340,6 +340,27 @@ impl Git {
         )
     }
 
+    pub fn add_tracking_branch(
+        &self,
+        repository: &Path,
+        destination: &Path,
+        branch: &str,
+        remote_ref: &str,
+    ) -> Result<Output> {
+        self.run(
+            repository,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--track"),
+                OsStr::new("-b"),
+                OsStr::new(branch),
+                destination.as_os_str(),
+                OsStr::new(remote_ref),
+            ],
+        )
+    }
+
     fn is_worktree_root(&self, path: &Path) -> Result<bool> {
         let inside = self.run(path, ["rev-parse", "--is-inside-work-tree"])?;
         if !inside.status.success() || text(&inside.stdout) != "true" {

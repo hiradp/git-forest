@@ -26,6 +26,7 @@ enum PlannedAction {
     Reuse,
     AddExistingBranch,
     CreateBranch,
+    CreateTrackingBranch,
 }
 
 impl PlannedAction {
@@ -33,9 +34,15 @@ impl PlannedAction {
         match self {
             Self::Reuse => ChangeAction::Reuse,
             Self::AddExistingBranch => ChangeAction::AddExistingBranch,
-            Self::CreateBranch => ChangeAction::CreateBranch,
+            Self::CreateBranch | Self::CreateTrackingBranch => ChangeAction::CreateBranch,
         }
     }
+}
+
+#[derive(Debug)]
+struct Overrides {
+    bases: HashMap<String, String>,
+    branches: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,8 +65,8 @@ pub fn run(
     require_existing_workspace: bool,
 ) -> Result<CommandOutcome> {
     let workspace_path = config.workspace_path(&arguments.workspace)?;
-    let branch = config.branch_for(&arguments.workspace)?;
-    let bases = validate_arguments(config, arguments)?;
+    let rendered_branch = config.branch_for(&arguments.workspace)?;
+    let overrides = validate_arguments(config, arguments)?;
 
     if workspace_path.exists() && !workspace_path.is_dir() {
         return Err(AppError::Operational(format!(
@@ -80,16 +87,18 @@ pub fn run(
             .repository(name)
             .expect("requested repositories were validated");
         let destination = workspace_path.join(name);
+        let branch_override = overrides.branches.get(name);
         let identity = Identity {
             name: name.clone(),
             destination,
-            branch: branch.clone(),
+            branch: branch_override.unwrap_or(&rendered_branch).clone(),
         };
         let result = preflight_repository(
             git,
             repository,
             identity,
-            bases.get(name).map(String::as_str),
+            overrides.bases.get(name).map(String::as_str),
+            branch_override.is_some(),
         )?;
         preflight.push(result);
     }
@@ -185,6 +194,16 @@ pub fn run(
                         .expect("new branches always have a base ref"),
                 )?,
             ),
+            PlannedAction::CreateTrackingBranch => Some(
+                git.add_tracking_branch(
+                    &plan.canonical_path,
+                    &plan.destination,
+                    &plan.branch,
+                    plan.base_ref
+                        .as_deref()
+                        .expect("tracking branches always have a remote ref"),
+                )?,
+            ),
         };
 
         let (status, message) = match result {
@@ -216,7 +235,7 @@ pub fn run(
     })
 }
 
-fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<HashMap<String, String>> {
+fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<Overrides> {
     let mut requested = HashSet::new();
     for name in &arguments.repositories {
         if !requested.insert(name.as_str()) {
@@ -231,11 +250,36 @@ fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<HashMap
         }
     }
 
+    let mut branches = HashMap::new();
+    for branch in &arguments.branches {
+        if !requested.contains(branch.repository.as_str()) {
+            return Err(AppError::InvalidInput(format!(
+                "branch override provided for unrequested repository {:?}",
+                branch.repository
+            )));
+        }
+        if branches
+            .insert(branch.repository.clone(), branch.branch.clone())
+            .is_some()
+        {
+            return Err(AppError::InvalidInput(format!(
+                "multiple branch overrides provided for repository {:?}",
+                branch.repository
+            )));
+        }
+    }
+
     let mut bases = HashMap::new();
     for base in &arguments.bases {
         if !requested.contains(base.repository.as_str()) {
             return Err(AppError::InvalidInput(format!(
                 "base override provided for unrequested repository {:?}",
+                base.repository
+            )));
+        }
+        if branches.contains_key(&base.repository) {
+            return Err(AppError::InvalidInput(format!(
+                "branch and base overrides cannot both be provided for repository {:?}",
                 base.repository
             )));
         }
@@ -249,7 +293,7 @@ fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<HashMap
             )));
         }
     }
-    Ok(bases)
+    Ok(Overrides { bases, branches })
 }
 
 fn preflight_repository(
@@ -257,6 +301,7 @@ fn preflight_repository(
     repository: &RepositoryConfig,
     identity: Identity,
     base_override: Option<&str>,
+    explicit_branch: bool,
 ) -> Result<Preflight> {
     let conflict = |message: String| Preflight::Conflict(identity.clone(), message);
 
@@ -277,7 +322,7 @@ fn preflight_repository(
 
     if !git.check_branch_name(&repository.path, &identity.branch)? {
         return Ok(conflict(format!(
-            "rendered branch name {:?} is not valid according to Git",
+            "branch name {:?} is not valid according to Git",
             identity.branch
         )));
     }
@@ -367,6 +412,27 @@ fn preflight_repository(
             "branch {} conflicts with existing branch {existing}",
             identity.branch
         )));
+    }
+
+    if explicit_branch {
+        let remote_ref = format!("refs/remotes/origin/{}", identity.branch);
+        if !git.resolves_to_commit(&repository.path, &remote_ref)? {
+            return Ok(conflict(format!(
+                "branch {} does not exist locally and remote-tracking branch origin/{} is unavailable in {}; run `git forest fetch {}`",
+                identity.branch,
+                identity.branch,
+                repository.path.display(),
+                repository.name,
+            )));
+        }
+        return Ok(Preflight::Ready(Plan {
+            name: identity.name,
+            canonical_path: repository.path.clone(),
+            destination: identity.destination,
+            branch: identity.branch,
+            base_ref: Some(remote_ref),
+            action: PlannedAction::CreateTrackingBranch,
+        }));
     }
 
     let base_ref = match base_override {

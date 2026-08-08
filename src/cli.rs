@@ -83,6 +83,10 @@ pub struct CreateArgs {
     #[arg(long = "base", value_name = "REPOSITORY=REF")]
     pub bases: Vec<BaseOverride>,
 
+    /// Use a local branch or create it tracking origin
+    #[arg(long = "branch", value_name = "REPOSITORY=BRANCH")]
+    pub branches: Vec<BranchOverride>,
+
     #[command(flatten)]
     pub output: OutputArgs,
 }
@@ -111,6 +115,34 @@ impl FromStr for BaseOverride {
         Ok(Self {
             repository: repository.to_owned(),
             reference: reference.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BranchOverride {
+    pub repository: String,
+    pub branch: String,
+}
+
+impl FromStr for BranchOverride {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (repository, branch) = value
+            .split_once('=')
+            .ok_or_else(|| "expected REPOSITORY=BRANCH".to_owned())?;
+
+        if repository.is_empty() {
+            return Err("repository name cannot be empty".to_owned());
+        }
+        if branch.is_empty() {
+            return Err("branch name cannot be empty".to_owned());
+        }
+
+        Ok(Self {
+            repository: repository.to_owned(),
+            branch: branch.to_owned(),
         })
     }
 }

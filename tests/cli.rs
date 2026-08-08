@@ -476,6 +476,43 @@ fn adds_a_repository_to_an_existing_workspace() {
 }
 
 #[test]
+fn adds_an_explicit_branch_to_an_existing_workspace() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "alpha", "--json"],
+    ));
+    git(
+        &fixture.canonical("beta"),
+        &["branch", "contributor/operator", "main"],
+    );
+
+    let output = forest(
+        &fixture.root,
+        &[
+            "add",
+            "topic",
+            "beta",
+            "--branch",
+            "beta=contributor/operator",
+            "--json",
+        ],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["branch"], "contributor/operator");
+    assert_eq!(report["repositories"][0]["action"], "add_existing_branch");
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("topic").join("beta"),
+            &["branch", "--show-current"]
+        ),
+        "contributor/operator"
+    );
+}
+
+#[test]
 fn reuses_a_preexisting_branch_that_is_not_checked_out() {
     let fixture = WorkspaceFixture::new();
     git(
@@ -489,6 +526,200 @@ fn reuses_a_preexisting_branch_that_is_not_checked_out() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["repositories"][0]["action"], "add_existing_branch");
     assert_eq!(report["repositories"][0]["base_ref"], Value::Null);
+}
+
+#[test]
+fn reattaches_an_explicit_local_branch_after_removing_its_workspace() {
+    let fixture = WorkspaceFixture::new();
+    git(
+        &fixture.canonical("alpha"),
+        &["branch", "contributor/retained", "main"],
+    );
+    assert_success(&forest(
+        &fixture.root,
+        &[
+            "create",
+            "old-review",
+            "alpha",
+            "--branch",
+            "alpha=contributor/retained",
+            "--json",
+        ],
+    ));
+    assert_success(&forest(&fixture.root, &["remove", "old-review", "--json"]));
+
+    let output = forest(
+        &fixture.root,
+        &[
+            "create",
+            "recovered",
+            "alpha",
+            "--branch",
+            "alpha=contributor/retained",
+            "--json",
+        ],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["branch"], "contributor/retained");
+    assert_eq!(report["repositories"][0]["action"], "add_existing_branch");
+    assert_eq!(report["repositories"][0]["base_ref"], Value::Null);
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("recovered").join("alpha"),
+            &["branch", "--show-current"]
+        ),
+        "contributor/retained"
+    );
+}
+
+#[test]
+fn creates_an_explicit_branch_tracking_origin() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    let publisher = fixture.root.join("alpha-review-publisher");
+    git(
+        &fixture.root,
+        &[
+            "clone",
+            path(&fixture.root.join("alpha-origin.git")),
+            path(&publisher),
+        ],
+    );
+    git(&publisher, &["config", "user.name", "Forest Test"]);
+    git(&publisher, &["config", "user.email", "forest@example.com"]);
+    git(&publisher, &["checkout", "-b", "contributor/review"]);
+    fs::write(publisher.join("review.txt"), "review\n").unwrap();
+    git(&publisher, &["add", "review.txt"]);
+    git(&publisher, &["commit", "-m", "review change"]);
+    let review_head = git_stdout(&publisher, &["rev-parse", "HEAD"]);
+    git(&publisher, &["push", "origin", "contributor/review"]);
+    assert_eq!(
+        git_stdout(&canonical, &["branch", "--list", "contributor/review"]),
+        ""
+    );
+    assert_success(&forest(&fixture.root, &["fetch", "alpha", "--json"]));
+    git(
+        &canonical,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/contributor/review",
+        ],
+    );
+
+    let output = forest(
+        &fixture.root,
+        &[
+            "create",
+            "pr-123",
+            "alpha",
+            "--branch",
+            "alpha=contributor/review",
+            "--json",
+        ],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["branch"], "contributor/review");
+    assert_eq!(report["repositories"][0]["action"], "create_branch");
+    assert_eq!(
+        report["repositories"][0]["base_ref"],
+        "refs/remotes/origin/contributor/review"
+    );
+    let worktree = fixture.workspace("pr-123").join("alpha");
+    assert_eq!(git_stdout(&worktree, &["rev-parse", "HEAD"]), review_head);
+    assert_eq!(
+        git_stdout(
+            &worktree,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ]
+        ),
+        "origin/contributor/review"
+    );
+
+    let repeated = forest(
+        &fixture.root,
+        &[
+            "create",
+            "pr-123",
+            "alpha",
+            "--branch",
+            "alpha=contributor/review",
+            "--json",
+        ],
+    );
+    assert_success(&repeated);
+    let report: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "reused");
+}
+
+#[test]
+fn explicit_branch_requires_a_local_or_origin_branch_before_mutation() {
+    let fixture = WorkspaceFixture::new();
+
+    let output = forest(
+        &fixture.root,
+        &[
+            "create",
+            "missing-branch",
+            "alpha",
+            "beta",
+            "--branch",
+            "alpha=contributor/missing",
+            "--json",
+        ],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("git forest fetch alpha")
+    );
+    assert_eq!(report["repositories"][1]["status"], "not_run");
+    assert!(!fixture.workspace("missing-branch").exists());
+}
+
+#[test]
+fn rejects_branch_and_base_overrides_for_the_same_repository() {
+    let fixture = WorkspaceFixture::new();
+
+    let output = forest(
+        &fixture.root,
+        &[
+            "create",
+            "ambiguous",
+            "alpha",
+            "--branch",
+            "alpha=contributor/review",
+            "--base",
+            "alpha=main",
+            "--json",
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["exit_code"], 2);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("branch and base overrides")
+    );
+    assert!(!fixture.workspace("ambiguous").exists());
 }
 
 #[test]

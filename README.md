@@ -91,8 +91,8 @@ valid names.
 ```text
 git forest repos [--json]
 git forest fetch [<repository>...] [--json]
-git forest create <workspace> <repository>... [--base <repository>=<ref>]... [--json]
-git forest add <workspace> <repository>... [--base <repository>=<ref>]... [--json]
+git forest create <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
+git forest add <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
 git forest list [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
@@ -152,6 +152,22 @@ An existing worktree is reused only when its path, canonical repository, and
 branch all match. An existing branch that is not checked out elsewhere is added
 without being recreated. New branches use `origin/HEAD` unless `--base` is
 provided.
+
+Use `--branch <repository>=<branch>` to select a branch independently of the
+workspace name. Forest first uses an existing local branch. If it is absent,
+Forest creates a local branch from `refs/remotes/origin/<branch>` and configures
+the remote branch as its upstream. The remote-tracking ref must already exist
+locally; creation never fetches. For example, to review a branch after fetching:
+
+```sh
+git forest fetch api
+git forest create review-123 api --branch api=contributor/fix
+```
+
+Repositories without a branch override continue to use the configured branch
+template. A branch override and a base override cannot both target the same
+repository. After later fetches, Forest reports whether a tracking branch is
+behind but never merges, resets, or otherwise updates it implicitly.
 
 Preflight conflicts prevent all mutation. If Git fails after earlier
 repositories have been created, successful worktrees are preserved and later
@@ -274,8 +290,10 @@ Fetch status is `fetched` or `failed`.
 ```
 
 `action` is `reuse`, `add_existing_branch`, `create_branch`, or `null` for a
-conflict discovered before an action could be selected. `status` is `reused`,
-`created`, `conflict`, `failed`, or `not_run`.
+conflict discovered before an action could be selected. A branch created to
+track an explicit `--branch` uses `create_branch`, with its remote-tracking ref
+in `base_ref`. `status` is `reused`, `created`, `conflict`, `failed`, or
+`not_run`.
 
 ### List
 
