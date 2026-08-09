@@ -285,6 +285,21 @@ impl Git {
         Ok(Ok(status.stdout.is_empty()))
     }
 
+    pub fn clone_repository(&self, remote: &str, destination: &Path) -> Result<Output> {
+        let mut command = Command::new("git");
+        command
+            .arg("clone")
+            .arg("--quiet")
+            .arg("--no-recurse-submodules")
+            .arg("--")
+            .arg(remote)
+            .arg(destination);
+        for variable in REPOSITORY_ENVIRONMENT {
+            command.env_remove(variable);
+        }
+        command.output().map_err(AppError::StartGit)
+    }
+
     pub fn fetch_origin(&self, repository: &Path) -> Result<Output> {
         self.run(
             repository,

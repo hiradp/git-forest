@@ -18,6 +18,30 @@ pub struct RepositoryReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RepositoriesSetupReport {
+    pub repositories: Vec<RepositorySetupReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepositorySetupReport {
+    pub name: String,
+    pub path: PathBuf,
+    pub remote: Option<String>,
+    pub status: SetupStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupStatus {
+    Cloned,
+    Reused,
+    Conflict,
+    Failed,
+    NotRun,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RepositoriesFetchReport {
     pub repositories: Vec<RepositoryFetchReport>,
 }
@@ -205,6 +229,7 @@ impl CommandOutcome {
 
 #[derive(Debug)]
 pub enum CommandReport {
+    RepositoriesSetup(RepositoriesSetupReport),
     Repositories(RepositoriesReport),
     RepositoriesFetch(RepositoriesFetchReport),
     WorkspaceChange(WorkspaceChangeReport),

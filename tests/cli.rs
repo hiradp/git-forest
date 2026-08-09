@@ -143,6 +143,20 @@ impl WorkspaceFixture {
         Self { _temp: temp, root }
     }
 
+    fn without_clones() -> Self {
+        let fixture = Self::new();
+        for name in ["alpha", "beta", "gamma"] {
+            fs::remove_dir_all(fixture.canonical(name)).unwrap();
+        }
+        let remote = format!("{}/{{name}}-origin.git", fixture.root.display());
+        write_config_with_remote(
+            &fixture.root.join(".forest.toml"),
+            &["alpha", "beta", "gamma"],
+            Some(&remote),
+        );
+        fixture
+    }
+
     fn canonical(&self, name: &str) -> PathBuf {
         self.root.join("src").join(name)
     }
@@ -249,6 +263,156 @@ fn environment_config_works_outside_the_project_tree() {
     assert_success(&output);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["repositories"][0]["name"], "alpha");
+}
+
+#[test]
+fn setup_clones_missing_canonical_repositories_and_is_idempotent() {
+    let fixture = WorkspaceFixture::without_clones();
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("GIT_DIR", fixture.root.join("unrelated.git"))
+        .args(["setup", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repositories = report["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), 3);
+    assert!(
+        repositories
+            .iter()
+            .all(|repository| repository["status"] == "cloned")
+    );
+    for name in ["alpha", "beta", "gamma"] {
+        let canonical = fixture.canonical(name);
+        assert_eq!(
+            git_stdout(&canonical, &["branch", "--show-current"]),
+            "main"
+        );
+        assert_eq!(
+            git_stdout(&canonical, &["remote", "get-url", "origin"]),
+            path(&fixture.root.join(format!("{name}-origin.git")))
+        );
+    }
+
+    let repeated = forest(&fixture.root, &["setup", "--json"]);
+
+    assert_success(&repeated);
+    let report: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert!(
+        report["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|repository| repository["status"] == "reused")
+    );
+}
+
+#[test]
+fn setup_preflights_every_repository_before_cloning() {
+    let fixture = WorkspaceFixture::without_clones();
+    let occupied = fixture.canonical("beta");
+    fs::create_dir_all(&occupied).unwrap();
+    fs::write(occupied.join("keep.txt"), "keep\n").unwrap();
+
+    let output = forest(&fixture.root, &["setup", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "not_run");
+    assert_eq!(report["repositories"][1]["status"], "conflict");
+    assert_eq!(report["repositories"][2]["status"], "not_run");
+    assert!(
+        report["repositories"][1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a Git worktree")
+    );
+    assert!(!fixture.canonical("alpha").exists());
+    assert!(occupied.join("keep.txt").exists());
+    assert!(!fixture.canonical("gamma").exists());
+}
+
+#[test]
+fn setup_requires_a_remote_template_for_missing_repositories() {
+    let fixture = WorkspaceFixture::without_clones();
+    write_config_with_remote(
+        &fixture.root.join(".forest.toml"),
+        &["alpha", "beta", "gamma"],
+        None,
+    );
+
+    let output = forest(&fixture.root, &["setup", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|repository| repository["status"] == "conflict")
+    );
+    assert!(!fixture.canonical("alpha").exists());
+}
+
+#[test]
+fn setup_reports_partial_clone_failure_and_resumes() {
+    let fixture = WorkspaceFixture::without_clones();
+    let fake_bin = fixture.root.join("fake-setup-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        r#"#!/bin/sh
+destination=""
+for argument in "$@"; do destination="$argument"; done
+if [ "$1" = "clone" ] && [ "$destination" = "$FAIL_REPO" ]; then
+  echo "simulated clone failure" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+
+    let partial = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("REAL_GIT", find_executable("git"))
+        .env(
+            "FAIL_REPO",
+            fixture.root.canonicalize().unwrap().join("src/beta"),
+        )
+        .args(["setup", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!partial.status.success());
+    let report: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "cloned");
+    assert_eq!(report["repositories"][1]["status"], "failed");
+    assert_eq!(report["repositories"][2]["status"], "not_run");
+    assert!(fixture.canonical("alpha").exists());
+    assert!(!fixture.canonical("beta").exists());
+    assert!(!fixture.canonical("gamma").exists());
+
+    let resumed = forest(&fixture.root, &["setup", "--json"]);
+
+    assert_success(&resumed);
+    let report: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "reused");
+    assert_eq!(report["repositories"][1]["status"], "cloned");
+    assert_eq!(report["repositories"][2]["status"], "cloned");
 }
 
 #[test]
@@ -1728,11 +1892,18 @@ fn initialize_repository(root: &Path, name: &str, default_branch: &str) {
 }
 
 fn write_config(path: &Path, members: &[&str]) {
+    write_config_with_remote(path, members, Some("git@example.com:{name}.git"));
+}
+
+fn write_config_with_remote(path: &Path, members: &[&str], remote: Option<&str>) {
     let members = members
         .iter()
         .map(|member| format!("  {member:?},"))
         .collect::<Vec<_>>()
         .join("\n");
+    let remote = remote
+        .map(|remote| format!("remote = {remote:?}\n"))
+        .unwrap_or_default();
     fs::write(
         path,
         format!(
@@ -1740,8 +1911,7 @@ fn write_config(path: &Path, members: &[&str]) {
 
 [repositories]
 root = "src"
-remote = "git@example.com:{{name}}.git"
-members = [
+{remote}members = [
 {members}
 ]
 

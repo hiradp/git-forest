@@ -5,6 +5,7 @@ mod list;
 mod path;
 mod remove;
 mod repos;
+mod setup;
 mod status;
 
 use crate::cli::{Cli, Command};
@@ -16,6 +17,7 @@ use crate::herdr::Herdr;
 
 pub fn run(cli: &Cli, config: &Config, git: &Git, herdr: &Herdr) -> Result<CommandOutcome> {
     match &cli.command {
+        Command::Setup(_) => setup::run(config, git),
         Command::Repos(_) => repos::run(config, git)
             .map(CommandReport::Repositories)
             .map(CommandOutcome::success),

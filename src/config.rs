@@ -20,6 +20,7 @@ pub struct Config {
 pub struct RepositoryConfig {
     pub name: String,
     pub path: PathBuf,
+    pub remote: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,12 +111,16 @@ impl Config {
         let workspaces_root =
             resolve_relative(&project_root, &raw.workspaces.root, "workspaces.root")?;
 
+        let remote_template = raw.repositories.remote;
         let repositories = raw
             .repositories
             .members
             .into_iter()
             .map(|name| RepositoryConfig {
                 path: repositories_root.join(&name),
+                remote: remote_template
+                    .as_ref()
+                    .map(|template| template.replace("{name}", &name)),
                 name,
             })
             .collect();
@@ -331,6 +336,10 @@ mod tests {
         assert_eq!(
             config.repositories[0].path,
             Path::new("/project/src/second")
+        );
+        assert_eq!(
+            config.repositories[0].remote.as_deref(),
+            Some("git@example.com:second.git")
         );
         assert_eq!(config.repositories[1].name, "first");
         assert_eq!(

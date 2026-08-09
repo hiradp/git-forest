@@ -8,11 +8,11 @@ git-forest <command>
 git forest <command>
 ```
 
-The tool is non-interactive. It contacts remotes only for an explicit `fetch`
-command. It does not clone, delete branches, start runtime services, or maintain
-a separate worktree registry. Git worktree metadata and the filesystem are
-authoritative. The explicit `attach` command can create or focus a workspace in
-a running [Herdr](https://herdr.dev) session.
+The tool is non-interactive. It contacts remotes only for explicit `setup` and
+`fetch` commands. It does not pull, delete branches, start runtime services, or
+maintain a separate worktree registry. Git worktree metadata and the filesystem
+are authoritative. The explicit `attach` command can create or focus a
+workspace in a running [Herdr](https://herdr.dev) session.
 
 ## Installation
 
@@ -65,8 +65,9 @@ branch = "user/{workspace}"
 
 All paths are relative to the directory containing `.forest.toml`.
 `repositories.root` contains the canonical clones. Each member is both its CLI
-name and its directory beneath that root. `repositories.remote` is optional and
-reserved for future setup support; v1 never clones a missing repository.
+name and its directory beneath that root. `repositories.remote` is optional for
+projects that provision repositories separately. It is required by `setup`
+when a canonical clone is missing.
 
 The only supported placeholders are:
 
@@ -90,6 +91,7 @@ valid names.
 ## Commands
 
 ```text
+git forest setup [--json]
 git forest repos [--json]
 git forest fetch [<repository>...] [--json]
 git forest create <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
@@ -109,6 +111,19 @@ Global options:
 --version
 ```
 
+### `setup`
+
+Ensures every configured canonical repository exists. Existing Git worktrees
+are reused without fetching or changing their remotes. Missing repositories are
+cloned from the rendered `repositories.remote` template in configuration order.
+
+Before cloning, Forest checks every configured destination. An existing path
+that is not a Git worktree or a missing repository without a configured remote
+prevents all cloning. If a clone fails after earlier repositories succeeded,
+the successful clones are preserved and later repositories are not run.
+Repeating the command safely reuses completed clones and resumes the rest.
+Forest never overwrites an existing path.
+
 ### `repos`
 
 Lists configured repositories in configuration order. Missing canonical clones
@@ -125,8 +140,9 @@ Fetches `origin` for every configured canonical repository. Pass repository
 names to fetch only a subset. The command attempts every selected repository
 and exits unsuccessfully if any fetch fails.
 
-This is the only command that contacts remotes. It updates remote-tracking refs,
-including the `origin/HEAD` target used as the default creation base, but does
+Together with `setup`, this is the only command that contacts remotes. It
+updates remote-tracking refs, including the `origin/HEAD` target used as the
+default creation base, but does
 not merge, reset, or otherwise update local branches or worktrees. To create a
 workspace from the latest fetched defaults:
 
@@ -274,6 +290,24 @@ partially completed removal is safe.
 
 Paths are absolute. Optional values are represented as `null` rather than
 omitted.
+
+### Setup
+
+```json
+{
+  "repositories": [
+    {
+      "name": "api",
+      "path": "/project/src/api",
+      "remote": "git@github.com:example/api.git",
+      "status": "cloned",
+      "message": null
+    }
+  ]
+}
+```
+
+Setup status is `cloned`, `reused`, `conflict`, `failed`, or `not_run`.
 
 ### Repositories
 

@@ -16,6 +16,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Ensure configured canonical repositories are cloned
+    Setup(OutputArgs),
+
     /// List configured repositories
     Repos(OutputArgs),
 
@@ -47,7 +50,7 @@ pub enum Command {
 impl Command {
     pub fn json(&self) -> bool {
         match self {
-            Self::Repos(args) | Self::List(args) => args.json,
+            Self::Setup(args) | Self::Repos(args) | Self::List(args) => args.json,
             Self::Fetch(args) => args.output.json,
             Self::Create(args) | Self::Add(args) => args.output.json,
             Self::Status(args) => args.output.json,
