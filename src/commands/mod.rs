@@ -8,15 +8,16 @@ mod repos;
 mod setup;
 mod status;
 
-use crate::cli::{Cli, Command};
+use crate::cli::Command;
 use crate::config::Config;
 use crate::domain::{CommandOutcome, CommandReport};
 use crate::error::Result;
 use crate::git::Git;
 use crate::herdr::Herdr;
 
-pub fn run(cli: &Cli, config: &Config, git: &Git, herdr: &Herdr) -> Result<CommandOutcome> {
-    match &cli.command {
+pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Result<CommandOutcome> {
+    match command {
+        Command::Open => unreachable!("the interactive launcher is dispatched by main"),
         Command::Setup(_) => setup::run(config, git),
         Command::Repos(_) => repos::run(config, git)
             .map(CommandReport::Repositories)

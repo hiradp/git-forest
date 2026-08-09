@@ -90,6 +90,11 @@ pub fn render_error_message(message: &str, exit_code: u8) -> Result<()> {
     writeln!(writer).map_err(AppError::WriteOutput)
 }
 
+pub fn render_blank_line() -> Result<()> {
+    let stdout = io::stdout();
+    writeln!(stdout.lock()).map_err(AppError::WriteOutput)
+}
+
 pub fn render(report: &CommandReport, json: bool) -> Result<()> {
     let stdout = io::stdout();
     let styles = Styles::stdout();

@@ -8,11 +8,13 @@ git-forest <command>
 git forest <command>
 ```
 
-The tool is non-interactive. It contacts remotes only for explicit `setup` and
-`fetch` commands. It does not pull, delete branches, start runtime services, or
-maintain a separate worktree registry. Git worktree metadata and the filesystem
-are authoritative. The explicit `attach` command can create or focus a
-workspace in a running [Herdr](https://herdr.dev) session.
+Running `git forest` without a subcommand opens an interactive workspace
+launcher. The existing management commands remain non-interactive; `open`
+explicitly starts the same launcher. Forest contacts remotes only for explicit
+`setup` and `fetch` commands. It does not pull, delete branches, start runtime
+services, or maintain a separate worktree registry. Git worktree metadata and the filesystem are authoritative. The
+launcher and the explicit `attach` command can create or focus a workspace in a
+running [Herdr](https://herdr.dev) session.
 
 ## Installation
 
@@ -91,6 +93,8 @@ valid names.
 ## Commands
 
 ```text
+git forest
+git forest open
 git forest setup [--json]
 git forest repos [--json]
 git forest fetch [<repository>...] [--json]
@@ -110,6 +114,34 @@ Global options:
 --help
 --version
 ```
+
+### Interactive launcher
+
+Run `git forest` in a terminal to open the workspace launcher. `git forest open`
+is the explicit equivalent. Start typing to fuzzy-search workspaces, then press
+enter to attach the selected workspace in Herdr.
+
+```text
+  🌲 Forest
+  Pick a workspace. We’ll get it ready.
+
+◆ Where do you want to work?
+› +  Create a new workspace
+  logical-slots  api · operator
+  review-123     api
+[type to search · ↑↓ to move · enter to open · esc to leave]
+```
+
+The first picker also offers **Create a new workspace**. Forest prompts for a
+valid name and presents the configured repositories as a searchable
+multi-select. After a successful preflight it creates the linked worktrees and
+attaches the new workspace. The launcher uses the configured branch template
+and each repository's local `origin/HEAD`; use the non-interactive `create`
+command when branch or base overrides are needed.
+
+Press escape at any prompt to leave without making changes. The launcher honors
+`NO_COLOR`. Without an interactive terminal, invoking Forest without a
+subcommand prints help instead of waiting for input.
 
 ### `setup`
 

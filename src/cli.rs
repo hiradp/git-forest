@@ -11,11 +11,20 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+}
+
+impl Cli {
+    pub fn json(&self) -> bool {
+        self.command.as_ref().is_some_and(Command::json)
+    }
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Search, create, and open workspaces interactively
+    Open,
+
     /// Ensure configured canonical repositories are cloned
     Setup(OutputArgs),
 
@@ -50,6 +59,7 @@ pub enum Command {
 impl Command {
     pub fn json(&self) -> bool {
         match self {
+            Self::Open => false,
             Self::Setup(args) | Self::Repos(args) | Self::List(args) => args.json,
             Self::Fetch(args) => args.output.json,
             Self::Create(args) | Self::Add(args) => args.output.json,

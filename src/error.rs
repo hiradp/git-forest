@@ -71,6 +71,9 @@ pub enum AppError {
 
     #[error("could not serialize JSON output: {0}")]
     SerializeJson(#[source] serde_json::Error),
+
+    #[error("interactive prompt failed: {0}")]
+    Prompt(#[source] inquire::InquireError),
 }
 
 impl AppError {
@@ -81,7 +84,8 @@ impl AppError {
             | Self::ReadConfig { .. }
             | Self::ParseConfig { .. }
             | Self::InvalidConfig(_)
-            | Self::InvalidInput(_) => 2,
+            | Self::InvalidInput(_)
+            | Self::Prompt(inquire::InquireError::NotTTY) => 2,
             _ => 1,
         }
     }
