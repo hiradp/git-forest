@@ -4,9 +4,12 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default:
     @just --list
 
-# Install git-forest into Cargo's binary directory.
+# Install git-forest and its manual into Cargo's installation prefix.
 install:
-    cargo install --locked --force --path "{{ justfile_directory() }}"
+    root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"; \
+        cargo install --locked --force --root "$root" --path "{{ justfile_directory() }}"; \
+        mkdir -p "$root/share/man/man1"; \
+        install -m 0644 "{{ justfile_directory() }}/docs/git-forest.1" "$root/share/man/man1/git-forest.1"
 
 # Apply formatting and Clippy fixes, then verify the tree.
 check:

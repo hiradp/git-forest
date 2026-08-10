@@ -2240,6 +2240,53 @@ fn explicit_launcher_rejects_non_interactive_input() {
 }
 
 #[test]
+fn git_style_long_help_uses_installed_manual() {
+    let temp = tempfile::tempdir().unwrap();
+    let prefix = temp.path();
+    let bin_dir = prefix.join("bin");
+    let man_dir = prefix.join("share/man/man1");
+    fs::create_dir(&bin_dir).unwrap();
+    fs::create_dir_all(&man_dir).unwrap();
+    fs::copy(binary(), bin_dir.join("git-forest")).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/git-forest.1"),
+        man_dir.join("git-forest.1"),
+    )
+    .unwrap();
+
+    let man = bin_dir.join("man");
+    fs::write(
+        &man,
+        "#!/bin/sh\nexec /bin/cat \"$FOREST_TEST_MAN_ROOT/share/man/man1/$1.1\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&man).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&man, permissions).unwrap();
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+    let output = Command::new("git")
+        .env("PATH", command_path)
+        .env("HOME", prefix)
+        .env("XDG_CONFIG_HOME", prefix)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_MAN_VIEWER", "man")
+        .env("FOREST_TEST_MAN_ROOT", prefix)
+        .args(["-c", "help.format=man", "forest", "--help"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(".TH \"GIT-FOREST\" \"1\""));
+    assert!(stdout.contains(".SH COMMANDS"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn direct_and_git_subcommand_invocations_match() {
     let fixture = Fixture::new();
     let direct = forest(&fixture.canonical, &["repos", "--json"]);

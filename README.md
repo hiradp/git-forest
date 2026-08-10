@@ -23,28 +23,31 @@ The project currently tests Linux and macOS. Building from source requires Git
 and [Rust](https://rustup.rs/); the repository pins its Rust toolchain in
 `rust-toolchain.toml`.
 
-Clone the repository and install the binary with Cargo:
+Clone the repository and use the [`just`](https://just.systems/) install
+recipe:
 
 ```sh
 git clone https://github.com/hiradp/git-forest.git
 cd git-forest
-cargo install --locked --path .
-```
-
-The [`just`](https://just.systems/) development recipes provide an equivalent
-install command that forces replacement of an existing installation:
-
-```sh
 just install
 ```
 
-Both commands install into Cargo's binary directory (normally
-`$CARGO_HOME/bin`, which must be on `PATH`). Set `CARGO_INSTALL_ROOT` to choose
-another installation prefix:
+This installs the executable into Cargo's binary directory and the
+`git-forest(1)` manual into the same prefix. The manual is required because Git
+interprets `git forest --help` as a request for a manual page before it invokes
+an external Git command. The executable directory (normally `$CARGO_HOME/bin`)
+must be on `PATH` so both the command and its manual can be discovered.
+
+Set `CARGO_INSTALL_ROOT` to choose another installation prefix:
 
 ```sh
 CARGO_INSTALL_ROOT="$HOME/.local" just install
 ```
+
+Cargo itself installs only executables. If you instead run
+`cargo install --locked --path .`, use `git forest -h` or `git-forest --help`
+for command-line help; `git forest --help` requires the manual installed by the
+`just` recipe.
 
 ## Configuration
 
@@ -114,8 +117,8 @@ Global options:
 
 ```text
 --config <path>
---help
---version
+-h, --help
+-V, --version
 ```
 
 ### Interactive launcher

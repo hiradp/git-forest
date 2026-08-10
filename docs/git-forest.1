@@ -1,0 +1,168 @@
+.TH "GIT-FOREST" "1" "2026-08-10" "git-forest" "Git Manual"
+.SH NAME
+git-forest \- manage named workspaces across multiple Git repositories
+.SH SYNOPSIS
+.B git forest
+.RI [ options ]
+.RI [ command ]
+.br
+.B git-forest
+.RI [ options ]
+.RI [ command ]
+.SH DESCRIPTION
+.B git-forest
+manages one named workspace across multiple configured canonical repositories
+using linked Git worktrees.
+Git exposes the installed executable as both
+.B git-forest
+and
+.BR "git forest" .
+.PP
+With no command, Forest opens an interactive workspace launcher.
+The
+.B open
+command starts the same launcher explicitly.
+Without an interactive terminal, invoking Forest without a command prints its
+command-line help.
+.PP
+Forest treats Git worktree metadata and the filesystem as authoritative.
+It does not maintain a separate registry, reset or delete branches, or perform
+implicit network operations.
+Only
+.BR setup ,
+.BR fetch ,
+and
+.B update
+contact remotes.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Display help.
+When using the Git-style command, Git handles
+.B git forest \-\-help
+itself by opening this manual page.
+Use
+.B git forest \-h
+for concise command-line help.
+.TP
+.BR \-V ", " \-\-version
+Display the git-forest version.
+.TP
+.BI \-\-config " PATH"
+Use an explicit configuration file instead of configuration discovery.
+This option is global and may be used with any command.
+.TP
+.B \-\-json
+Emit structured JSON.
+This option is available on non-interactive commands.
+.SH COMMANDS
+.TP
+.B open
+Search, create, and open workspaces interactively.
+.TP
+.B setup
+Ensure configured canonical repositories are cloned.
+Existing Git worktrees are reused without fetching or changing their remotes.
+.TP
+.B repos
+List configured repositories, their origin URLs, and their locally known
+default refs.
+.TP
+.BI fetch " [repository ...]"
+Fetch
+.B origin
+for all configured repositories or for the named subset.
+Use
+.BI \-\-jobs " N"
+to limit concurrent fetches.
+.TP
+.BI update " [repository ...]"
+Fetch and fast-forward canonical default branches for all configured
+repositories or for the named subset.
+Updates are fast-forward only and never reset or force a branch.
+Use
+.BI \-\-jobs " N"
+to limit concurrent fetches.
+.TP
+.BI create " workspace repository ..."
+Create a workspace and linked worktrees.
+Use
+.BI \-\-base " repository=ref"
+to override a creation base and
+.BI \-\-branch " repository=branch"
+to select an existing local branch or create one from its remote-tracking ref.
+Creation preflights every requested repository before mutation and is safe to
+repeat after partial execution.
+.TP
+.BI add " workspace repository ..."
+Add linked worktrees to an existing workspace.
+It accepts the same
+.B \-\-base
+and
+.B \-\-branch
+options as
+.BR create .
+.TP
+.B list
+List workspaces by reconciling workspace directories with Git worktree
+metadata.
+.TP
+.BI status " [workspace]"
+Show workspace and worktree status, including dirty state, upstream, and
+ahead/behind counts.
+.TP
+.BI path " workspace"
+Print the absolute path of an existing workspace.
+.TP
+.BI attach " workspace"
+Open an existing workspace in a running Herdr session.
+.TP
+.BI remove " workspace [repository ...]"
+Remove all worktrees in a workspace or only the named repository worktrees.
+Removal rejects dirty or unregistered paths, uses
+.B git worktree remove,
+preserves branches, and has no force option.
+.SH CONFIGURATION
+Forest reads a
+.B .forest.toml
+file with a supported version, configured repositories, and workspace path and
+branch templates.
+Unless
+.B \-\-config
+or
+.B FOREST_CONFIG
+is set, Forest searches from the current directory toward the filesystem root.
+.PP
+Paths in the file are relative to the directory containing it.
+The repository remote template may use
+.BR {name} ,
+and the workspace branch template may use
+.BR {workspace} .
+See the git-forest README for the complete format and policy.
+.SH ENVIRONMENT
+.TP
+.B FOREST_CONFIG
+Path to the configuration file.
+It has lower precedence than
+.BR \-\-config .
+.TP
+.B NO_COLOR
+Disable colored human-readable output.
+.TP
+.B PATH
+Used to find Git and, for
+.BR attach ,
+the Herdr executable.
+.SH EXIT STATUS
+.TP
+.B 0
+Success, including fully idempotent operations.
+.TP
+.B 1
+An operational conflict or a Git, Herdr, or filesystem failure.
+.TP
+.B 2
+A usage, input, or configuration error.
+.SH SEE ALSO
+.BR git (1),
+.BR git-worktree (1)
