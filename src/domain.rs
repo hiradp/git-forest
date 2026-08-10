@@ -62,6 +62,29 @@ pub enum FetchStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RepositoriesUpdateReport {
+    pub repositories: Vec<RepositoryUpdateReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepositoryUpdateReport {
+    pub name: String,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub status: UpdateStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateStatus {
+    Updated,
+    UpToDate,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorkspaceChangeReport {
     pub workspace: String,
     pub path: PathBuf,
@@ -232,6 +255,7 @@ pub enum CommandReport {
     RepositoriesSetup(RepositoriesSetupReport),
     Repositories(RepositoriesReport),
     RepositoriesFetch(RepositoriesFetchReport),
+    RepositoriesUpdate(RepositoriesUpdateReport),
     WorkspaceChange(WorkspaceChangeReport),
     WorkspacesList(WorkspacesListReport),
     WorkspacesStatus(WorkspacesStatusReport),

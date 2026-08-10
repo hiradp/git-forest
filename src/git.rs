@@ -105,6 +105,50 @@ impl Git {
             .success())
     }
 
+    pub fn resolve_reference(&self, repository: &Path, reference: &str) -> Result<String> {
+        let output = self.run(repository, ["rev-parse", "--verify", reference])?;
+        if !output.status.success() {
+            return Err(AppError::Git {
+                context: format!("could not resolve {reference} in {}", repository.display()),
+                message: failure_message(&output),
+            });
+        }
+        Ok(text(&output.stdout))
+    }
+
+    pub fn reference_ahead_behind(
+        &self,
+        repository: &Path,
+        local: &str,
+        remote: &str,
+    ) -> Result<(u64, u64)> {
+        let range = format!("{local}...{remote}");
+        let output = self.run(repository, ["rev-list", "--left-right", "--count", &range])?;
+        if !output.status.success() {
+            return Err(AppError::Git {
+                context: format!(
+                    "could not compare {local} with {remote} in {}",
+                    repository.display()
+                ),
+                message: failure_message(&output),
+            });
+        }
+        let counts = text(&output.stdout);
+        let mut fields = counts.split_whitespace();
+        let ahead = fields.next().and_then(|count| count.parse::<u64>().ok());
+        let behind = fields.next().and_then(|count| count.parse::<u64>().ok());
+        if fields.next().is_some() || ahead.is_none() || behind.is_none() {
+            return Err(AppError::Git {
+                context: format!(
+                    "could not compare {local} with {remote} in {}",
+                    repository.display()
+                ),
+                message: format!("could not parse Git ahead/behind counts {counts:?}"),
+            });
+        }
+        Ok((ahead.unwrap(), behind.unwrap()))
+    }
+
     pub fn branch_namespace_conflict(
         &self,
         repository: &Path,
@@ -170,6 +214,108 @@ impl Git {
             (repository_common_dir, worktree_common_dir),
             (Some(repository), Some(worktree)) if paths_match(&repository, &worktree)
         ))
+    }
+
+    pub fn worktree_dirty(&self, worktree: &Path) -> Result<bool> {
+        let status = self.run(
+            worktree,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        if !status.status.success() {
+            return Err(AppError::Git {
+                context: format!("could not inspect changes in {}", worktree.display()),
+                message: failure_message(&status),
+            });
+        }
+        Ok(!status.stdout.is_empty())
+    }
+
+    pub fn ignored_path_changed_between(
+        &self,
+        worktree: &Path,
+        old_oid: &str,
+        new_oid: &str,
+    ) -> Result<Option<String>> {
+        let changed = self.run(
+            worktree,
+            [
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                old_oid,
+                new_oid,
+                "--",
+            ],
+        )?;
+        if !changed.status.success() {
+            return Err(AppError::Git {
+                context: format!(
+                    "could not inspect incoming changes in {}",
+                    worktree.display()
+                ),
+                message: failure_message(&changed),
+            });
+        }
+
+        let ignored = self.run(
+            worktree,
+            [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
+        )?;
+        if !ignored.status.success() {
+            return Err(AppError::Git {
+                context: format!("could not inspect ignored files in {}", worktree.display()),
+                message: failure_message(&ignored),
+            });
+        }
+
+        let ignore_case = self.repository_path_ignore_case(worktree)?;
+        let changed_paths: Vec<&[u8]> = nul_fields(&changed.stdout).collect();
+        Ok(nul_fields(&ignored.stdout)
+            .filter_map(porcelain_ignored_path)
+            .find(|ignored_path| {
+                changed_paths.iter().any(|changed_path| {
+                    repository_paths_overlap(ignored_path, changed_path, ignore_case)
+                })
+            })
+            .map(|path| String::from_utf8_lossy(path).into_owned()))
+    }
+
+    fn repository_path_ignore_case(&self, repository: &Path) -> Result<bool> {
+        let output = self.run(
+            repository,
+            ["config", "--type=bool", "--get", "core.ignoreCase"],
+        )?;
+        if !output.status.success() {
+            if output.stderr.is_empty() {
+                return Ok(false);
+            }
+            return Err(AppError::Git {
+                context: format!(
+                    "could not inspect path handling in {}",
+                    repository.display()
+                ),
+                message: failure_message(&output),
+            });
+        }
+
+        match text(&output.stdout).as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            value => Err(AppError::Git {
+                context: format!(
+                    "could not inspect path handling in {}",
+                    repository.display()
+                ),
+                message: format!("unexpected core.ignoreCase value {value:?}"),
+            }),
+        }
     }
 
     pub fn current_branch_ref(&self, worktree: &Path) -> Result<Option<String>> {
@@ -310,8 +456,44 @@ impl Git {
     pub fn fetch_origin(&self, repository: &Path) -> Result<Output> {
         self.run(
             repository,
-            ["fetch", "--quiet", "--no-recurse-submodules", "origin"],
+            [
+                "fetch",
+                "--quiet",
+                "--no-recurse-submodules",
+                "--no-tags",
+                "origin",
+            ],
         )
+    }
+
+    pub fn fetch_origin_branch(&self, repository: &Path, branch: &str) -> Result<Output> {
+        let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+        self.run(
+            repository,
+            [
+                "fetch",
+                "--quiet",
+                "--no-recurse-submodules",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "origin",
+                &refspec,
+            ],
+        )
+    }
+
+    pub fn fast_forward(&self, worktree: &Path, remote_ref: &str) -> Result<Output> {
+        self.run(worktree, ["merge", "--quiet", "--ff-only", remote_ref])
+    }
+
+    pub fn update_ref(
+        &self,
+        repository: &Path,
+        local_ref: &str,
+        new_oid: &str,
+        old_oid: &str,
+    ) -> Result<Output> {
+        self.run(repository, ["update-ref", local_ref, new_oid, old_oid])
     }
 
     pub fn remove_worktree(&self, repository: &Path, worktree: &Path) -> Result<Output> {
@@ -383,7 +565,7 @@ impl Git {
         )
     }
 
-    fn is_worktree_root(&self, path: &Path) -> Result<bool> {
+    pub fn is_worktree_root(&self, path: &Path) -> Result<bool> {
         let inside = self.run(path, ["rev-parse", "--is-inside-work-tree"])?;
         if !inside.status.success() || text(&inside.stdout) != "true" {
             return Ok(false);
@@ -512,6 +694,35 @@ fn parse_worktrees(bytes: &[u8]) -> Result<Vec<Worktree>> {
     Ok(worktrees)
 }
 
+fn nul_fields(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+}
+
+fn porcelain_ignored_path(record: &[u8]) -> Option<&[u8]> {
+    record
+        .strip_prefix(b"!! ")
+        .map(|path| path.strip_suffix(b"/").unwrap_or(path))
+}
+
+fn repository_paths_overlap(left: &[u8], right: &[u8], ignore_case: bool) -> bool {
+    path_is_same_or_descendant(left, right, ignore_case)
+        || path_is_same_or_descendant(right, left, ignore_case)
+}
+
+fn path_is_same_or_descendant(path: &[u8], ancestor: &[u8], ignore_case: bool) -> bool {
+    let Some((prefix, suffix)) = path.split_at_checked(ancestor.len()) else {
+        return false;
+    };
+    let same_prefix = if ignore_case {
+        prefix.eq_ignore_ascii_case(ancestor)
+    } else {
+        prefix == ancestor
+    };
+    same_prefix && (suffix.is_empty() || suffix.first() == Some(&b'/'))
+}
+
 fn paths_match(left: &Path, right: &Path) -> bool {
     left == right
         || match (left.canonicalize(), right.canonicalize()) {
@@ -540,5 +751,31 @@ mod tests {
         assert_eq!(worktrees[0].branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(worktrees[1].path, Path::new("/project/space path"));
         assert!(worktrees[1].detached);
+    }
+
+    #[test]
+    fn detects_overlapping_repository_paths() {
+        assert_eq!(
+            porcelain_ignored_path(b"!! generated/"),
+            Some(b"generated".as_slice())
+        );
+        assert!(repository_paths_overlap(b"generated", b"generated", false));
+        assert!(repository_paths_overlap(
+            b"generated/nested/file",
+            b"generated",
+            false
+        ));
+        assert!(repository_paths_overlap(
+            b"generated",
+            b"generated/nested/file",
+            false
+        ));
+        assert!(repository_paths_overlap(b"Generated", b"generated", true));
+        assert!(!repository_paths_overlap(b"Generated", b"generated", false));
+        assert!(!repository_paths_overlap(
+            b"generated",
+            b"generated-old",
+            true
+        ));
     }
 }

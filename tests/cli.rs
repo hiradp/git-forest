@@ -555,7 +555,9 @@ fn fetches_all_origins_before_creating_a_workspace() {
     fs::write(publisher.join("published.txt"), "published\n").unwrap();
     git(&publisher, &["add", "published.txt"]);
     git(&publisher, &["commit", "-m", "published"]);
+    git(&publisher, &["tag", "remote-only-tag"]);
     git(&publisher, &["push", "origin", "main"]);
+    git(&publisher, &["push", "origin", "remote-only-tag"]);
     let published = git_stdout(&publisher, &["rev-parse", "HEAD"]);
 
     assert_eq!(
@@ -579,6 +581,10 @@ fn fetches_all_origins_before_creating_a_workspace() {
         published
     );
     assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), original);
+    assert_eq!(
+        git_stdout(&canonical, &["tag", "--list", "remote-only-tag"]),
+        ""
+    );
 
     let created = forest(&fixture.root, &["create", "fresh", "alpha", "--json"]);
     assert_success(&created);
@@ -608,6 +614,276 @@ fn reports_fetch_failures_without_skipping_other_repositories() {
             .as_str()
             .unwrap()
             .contains("does not exist")
+    );
+}
+
+#[test]
+fn fetches_repositories_concurrently_and_preserves_report_order() {
+    let fixture = WorkspaceFixture::new();
+    let fake_bin = fixture.root.join("fake-fetch-bin");
+    let markers = fixture.root.join("fetch-markers");
+    fs::create_dir(&fake_bin).unwrap();
+    fs::create_dir(&markers).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        r#"#!/bin/sh
+if [ "$1" = "-C" ] && [ "$3" = "fetch" ]; then
+  marker=$(basename "$2")
+  : > "$FETCH_MARKERS/$marker"
+  attempts=0
+  while [ "$(find "$FETCH_MARKERS" -type f | wc -l | tr -d ' ')" -lt 3 ]; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 100 ]; then
+      echo "fetches did not run concurrently" >&2
+      exit 1
+    fi
+    sleep 0.02
+  done
+fi
+exec "$REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("REAL_GIT", find_executable("git"))
+        .env("FETCH_MARKERS", markers)
+        .args(["fetch", "--jobs", "3", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let names = report["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| repository["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["alpha", "beta", "gamma"]);
+}
+
+#[test]
+fn update_fetches_and_fast_forwards_discovered_default_branches() {
+    let fixture = WorkspaceFixture::with_default("master");
+    let canonical = fixture.canonical("alpha");
+    let original = git_stdout(&canonical, &["rev-parse", "master"]);
+    let publisher = clone_publisher(&fixture, "alpha");
+    git(&publisher, &["switch", "-c", "topic"]);
+    publish_file(&publisher, "topic.txt", "topic\n", "topic");
+    git(&publisher, &["switch", "master"]);
+    let published = publish_file(&publisher, "published.txt", "published\n", "published");
+
+    let output = forest(&fixture.root, &["update", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["name"], "alpha");
+    assert_eq!(report["repositories"][0]["branch"], "master");
+    assert_eq!(report["repositories"][0]["status"], "updated");
+    assert_eq!(report["repositories"][1]["status"], "up_to_date");
+    assert_eq!(report["repositories"][2]["status"], "up_to_date");
+    assert_ne!(published, original);
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "master"]), published);
+    assert_eq!(
+        fs::read_to_string(canonical.join("published.txt")).unwrap(),
+        "published\n"
+    );
+    assert_eq!(
+        git_stdout(
+            &canonical,
+            &["branch", "--remotes", "--list", "origin/topic"]
+        ),
+        ""
+    );
+}
+
+#[test]
+fn update_refuses_dirty_default_branches_after_fetching() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    let original = git_stdout(&canonical, &["rev-parse", "main"]);
+    let publisher = clone_publisher(&fixture, "alpha");
+    let published = publish_file(&publisher, "published.txt", "published\n", "published");
+    fs::write(canonical.join("local.txt"), "dirty\n").unwrap();
+
+    let output = forest(&fixture.root, &["update", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["branch"], "main");
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("uncommitted changes")
+    );
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), original);
+    assert_eq!(
+        git_stdout(&canonical, &["rev-parse", "refs/remotes/origin/main"]),
+        published
+    );
+    assert_eq!(
+        fs::read_to_string(canonical.join("local.txt")).unwrap(),
+        "dirty\n"
+    );
+}
+
+#[test]
+fn update_preserves_ignored_files_that_conflict_with_incoming_changes() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    let original = git_stdout(&canonical, &["rev-parse", "main"]);
+    fs::write(canonical.join(".git/info/exclude"), "local-generated.txt\n").unwrap();
+    fs::write(canonical.join("local-generated.txt"), "local data\n").unwrap();
+    let publisher = clone_publisher(&fixture, "alpha");
+    let published = publish_file(
+        &publisher,
+        "local-generated.txt",
+        "remote data\n",
+        "publish generated file",
+    );
+
+    let output = forest(&fixture.root, &["update", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ignored path")
+    );
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), original);
+    assert_eq!(
+        git_stdout(&canonical, &["rev-parse", "refs/remotes/origin/main"]),
+        published
+    );
+    assert_eq!(
+        fs::read_to_string(canonical.join("local-generated.txt")).unwrap(),
+        "local data\n"
+    );
+}
+
+#[test]
+fn update_refuses_diverged_default_branches() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    let publisher = clone_publisher(&fixture, "alpha");
+    fs::write(canonical.join("local.txt"), "local\n").unwrap();
+    git(&canonical, &["add", "local.txt"]);
+    git(&canonical, &["commit", "-m", "local"]);
+    let local = git_stdout(&canonical, &["rev-parse", "main"]);
+    publish_file(&publisher, "remote.txt", "remote\n", "remote");
+
+    let output = forest(&fixture.root, &["update", "alpha", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("local commit(s)")
+    );
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), local);
+}
+
+#[test]
+fn update_moves_a_default_branch_that_is_not_checked_out() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    let original = git_stdout(&canonical, &["rev-parse", "main"]);
+    git(&canonical, &["switch", "-c", "topic"]);
+    let publisher = clone_publisher(&fixture, "alpha");
+    let published = publish_file(&publisher, "published.txt", "published\n", "published");
+
+    let output = forest(&fixture.root, &["update", "alpha", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "updated");
+    assert_eq!(
+        git_stdout(&canonical, &["branch", "--show-current"]),
+        "topic"
+    );
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "HEAD"]), original);
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), published);
+    assert!(!canonical.join("published.txt").exists());
+}
+
+#[test]
+fn update_does_not_replace_a_branch_changed_after_fast_forward_validation() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    git(&canonical, &["switch", "-c", "topic"]);
+    fs::write(canonical.join("concurrent.txt"), "concurrent\n").unwrap();
+    git(&canonical, &["add", "concurrent.txt"]);
+    git(&canonical, &["commit", "-m", "concurrent local commit"]);
+    let concurrent = git_stdout(&canonical, &["rev-parse", "HEAD"]);
+    let publisher = clone_publisher(&fixture, "alpha");
+    let published = publish_file(&publisher, "published.txt", "published\n", "published");
+    assert_ne!(concurrent, published);
+
+    let fake_bin = fixture.root.join("ref-race-bin");
+    let race_marker = fixture.root.join("ref-race-marker");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        r#"#!/bin/sh
+if [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "list" ]; then
+  : > "$RACE_MARKER"
+  "$REAL_GIT" -C "$2" update-ref refs/heads/main "$CONCURRENT_OID" || exit $?
+fi
+exec "$REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("REAL_GIT", find_executable("git"))
+        .env("RACE_MARKER", &race_marker)
+        .env("CONCURRENT_OID", &concurrent)
+        .args(["update", "alpha", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(race_marker.exists(), "the fake Git race hook did not run");
+    assert!(
+        !output.status.success(),
+        "update unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "failed");
+    assert_eq!(git_stdout(&canonical, &["rev-parse", "main"]), concurrent);
+    assert_eq!(
+        git_stdout(&canonical, &["rev-parse", "refs/remotes/origin/main"]),
+        published
     );
 }
 
@@ -2019,6 +2295,25 @@ fn initialize_repository(root: &Path, name: &str, default_branch: &str) {
         &canonical,
         &["remote", "set-head", "origin", default_branch],
     );
+}
+
+fn clone_publisher(fixture: &WorkspaceFixture, name: &str) -> PathBuf {
+    let publisher = fixture.root.join(format!("{name}-publisher"));
+    let origin = fixture.root.join(format!("{name}-origin.git"));
+    git(&fixture.root, &["clone", path(&origin), path(&publisher)]);
+    git(&publisher, &["config", "user.name", "Forest Test"]);
+    git(&publisher, &["config", "user.email", "forest@example.com"]);
+    publisher
+}
+
+fn publish_file(publisher: &Path, file: &str, contents: &str, message: &str) -> String {
+    fs::write(publisher.join(file), contents).unwrap();
+    git(publisher, &["add", file]);
+    git(publisher, &["commit", "-m", message]);
+    let branch = git_stdout(publisher, &["branch", "--show-current"]);
+    let destination = format!("HEAD:{branch}");
+    git(publisher, &["push", "origin", &destination]);
+    git_stdout(publisher, &["rev-parse", "HEAD"])
 }
 
 fn write_config(path: &Path, members: &[&str]) {

@@ -4,9 +4,9 @@ use serde::Serialize;
 
 use crate::domain::{
     AttachStatus, ChangeAction, ChangeStatus, CommandReport, FetchStatus, RemovalStatus,
-    RepositoriesFetchReport, RepositoriesReport, RepositoriesSetupReport, SetupStatus,
-    WorkspaceAttachReport, WorkspaceChangeReport, WorkspaceListEntry, WorkspaceRemovalReport,
-    WorkspaceStatusEntry,
+    RepositoriesFetchReport, RepositoriesReport, RepositoriesSetupReport, RepositoriesUpdateReport,
+    SetupStatus, UpdateStatus, WorkspaceAttachReport, WorkspaceChangeReport, WorkspaceListEntry,
+    WorkspaceRemovalReport, WorkspaceStatusEntry,
 };
 use crate::error::{AppError, Result};
 
@@ -105,6 +105,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::RepositoriesSetup(report) => render_json(&mut writer, report)?,
             CommandReport::Repositories(report) => render_json(&mut writer, report)?,
             CommandReport::RepositoriesFetch(report) => render_json(&mut writer, report)?,
+            CommandReport::RepositoriesUpdate(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceChange(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesList(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
@@ -123,6 +124,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         CommandReport::Repositories(report) => render_repositories(&mut writer, report, styles),
         CommandReport::RepositoriesFetch(report) => {
             render_repositories_fetch(&mut writer, report, styles)
+        }
+        CommandReport::RepositoriesUpdate(report) => {
+            render_repositories_update(&mut writer, report, styles)
         }
         CommandReport::WorkspaceChange(report) => {
             render_workspace_change(&mut writer, report, styles)
@@ -318,6 +322,58 @@ fn render_repositories_fetch(
             styles.bold(),
             repository.name,
             styles.reset(),
+            styles.reset(),
+        )
+        .map_err(AppError::WriteOutput)?;
+        if let Some(message) = &repository.message {
+            render_message(writer, message, styles)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_repositories_update(
+    writer: &mut impl Write,
+    report: &RepositoriesUpdateReport,
+    styles: Styles,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{}Update default branches{}",
+        styles.bold(),
+        styles.reset()
+    )
+    .map_err(AppError::WriteOutput)?;
+    writeln!(writer).map_err(AppError::WriteOutput)?;
+
+    let name_width = report
+        .repositories
+        .iter()
+        .map(|repository| repository.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let branch_width = report
+        .repositories
+        .iter()
+        .filter_map(|repository| repository.branch.as_deref())
+        .map(str::len)
+        .max()
+        .unwrap_or(1);
+    for repository in &report.repositories {
+        let (status, symbol, color) = match repository.status {
+            UpdateStatus::Updated => ("updated", "✓", styles.green()),
+            UpdateStatus::UpToDate => ("up to date", "✓", styles.green()),
+            UpdateStatus::Conflict => ("conflict", "!", styles.yellow()),
+            UpdateStatus::Failed => ("failed", "✗", styles.red()),
+        };
+        writeln!(
+            writer,
+            "  {color}{symbol}{} {}{:name_width$}{}  {:branch_width$}  {color}{status}{}",
+            styles.reset(),
+            styles.bold(),
+            repository.name,
+            styles.reset(),
+            repository.branch.as_deref().unwrap_or("—"),
             styles.reset(),
         )
         .map_err(AppError::WriteOutput)?;

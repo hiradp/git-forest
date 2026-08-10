@@ -7,6 +7,7 @@ mod remove;
 mod repos;
 mod setup;
 mod status;
+mod update;
 
 use crate::cli::Command;
 use crate::config::Config;
@@ -23,6 +24,7 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
             .map(CommandReport::Repositories)
             .map(CommandOutcome::success),
         Command::Fetch(arguments) => fetch::run(config, git, arguments),
+        Command::Update(arguments) => update::run(config, git, arguments),
         Command::Create(arguments) => create::run(config, git, arguments, false),
         Command::Add(arguments) => create::run(config, git, arguments, true),
         Command::List(_) => list::run(config, git)

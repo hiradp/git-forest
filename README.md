@@ -11,10 +11,11 @@ git forest <command>
 Running `git forest` without a subcommand opens an interactive workspace
 launcher. The existing management commands remain non-interactive; `open`
 explicitly starts the same launcher. Forest contacts remotes only for explicit
-`setup` and `fetch` commands. It does not pull, delete branches, start runtime
-services, or maintain a separate worktree registry. Git worktree metadata and the filesystem are authoritative. The
-launcher and the explicit `attach` command can create or focus a workspace in a
-running [Herdr](https://herdr.dev) session.
+`setup`, `fetch`, and `update` commands. It does not reset or delete branches,
+start runtime services, or maintain a separate worktree registry. Git worktree
+metadata and the filesystem are authoritative. The launcher and the explicit
+`attach` command can create or focus a workspace in a running
+[Herdr](https://herdr.dev) session.
 
 ## Installation
 
@@ -98,7 +99,8 @@ git forest
 git forest open
 git forest setup [--json]
 git forest repos [--json]
-git forest fetch [<repository>...] [--json]
+git forest fetch [<repository>...] [--jobs <N>] [--json]
+git forest update [<repository>...] [--jobs <N>] [--json]
 git forest create <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
 git forest add <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
 git forest list [--json]
@@ -172,18 +174,40 @@ never contacts a remote to repair a missing default.
 ### `fetch`
 
 Fetches `origin` for every configured canonical repository. Pass repository
-names to fetch only a subset. The command attempts every selected repository
-and exits unsuccessfully if any fetch fails.
+names to fetch only a subset. Fetches run concurrently, with at most 16 in
+flight by default; use `--jobs <N>` to change that bound. The report remains in
+configuration order. The command attempts every selected repository and exits
+unsuccessfully if any fetch fails. Forest does not fetch tags because its
+workspace operations consume remote-tracking branch refs only.
 
-Together with `setup`, this is the only command that contacts remotes. It
-updates remote-tracking refs, including the `origin/HEAD` target used as the
-default creation base, but does
-not merge, reset, or otherwise update local branches or worktrees. To create a
-workspace from the latest fetched defaults:
+`fetch` updates remote-tracking refs, including the `origin/HEAD` target used as
+the default creation base, but does not merge, reset, or otherwise update local
+branches or worktrees. To create a workspace from the latest fetched defaults:
 
 ```sh
 git forest fetch
 git forest create logical-slots api operator
+```
+
+### `update`
+
+Fetches the remote default branch, then fast-forwards its local branch in every
+configured canonical repository. Pass repository names to update only a subset.
+Fetches use the same bounded concurrency and `--jobs <N>` option as `fetch`, but
+transfer only the branch identified by `refs/remotes/origin/HEAD` rather than
+negotiating every remote branch and tag.
+
+Forest does not hard-code `main` or `master`. If the branch is checked out, Forest updates its
+worktree with a fast-forward-only merge. If it is not checked out, Forest moves
+the local ref only after verifying a fast-forward. Dirty checked-out branches,
+ignored paths that overlap incoming changes, missing local default branches,
+locally ahead branches, and diverged branches are reported as conflicts and are
+never reset or forced. A fetch or Git failure
+in one repository does not prevent the other selected repositories from being
+processed, but conflicts and failures make the command exit unsuccessfully.
+
+```sh
+git forest update
 ```
 
 ### `create` and `add`
@@ -377,6 +401,25 @@ Setup status is `cloned`, `reused`, `conflict`, `failed`, or `not_run`.
 ```
 
 Fetch status is `fetched` or `failed`.
+
+### Update
+
+```json
+{
+  "repositories": [
+    {
+      "name": "api",
+      "path": "/project/src/api",
+      "branch": "main",
+      "status": "updated",
+      "message": null
+    }
+  ]
+}
+```
+
+Update status is `updated`, `up_to_date`, `conflict`, or `failed`. `branch` is
+null when `origin/HEAD` or the fetch result does not identify a default branch.
 
 ### Create and add
 

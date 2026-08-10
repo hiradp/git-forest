@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -34,6 +35,9 @@ pub enum Command {
     /// Fetch origin for configured repositories
     Fetch(FetchArgs),
 
+    /// Fetch and fast-forward canonical default branches
+    Update(UpdateArgs),
+
     /// Create a workspace and its linked worktrees
     Create(CreateArgs),
 
@@ -62,6 +66,7 @@ impl Command {
             Self::Open => false,
             Self::Setup(args) | Self::Repos(args) | Self::List(args) => args.json,
             Self::Fetch(args) => args.output.json,
+            Self::Update(args) => args.output.json,
             Self::Create(args) | Self::Add(args) => args.output.json,
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
@@ -82,6 +87,23 @@ pub struct OutputArgs {
 pub struct FetchArgs {
     /// Configured repository names; fetch all when omitted
     pub repositories: Vec<String>,
+
+    /// Maximum number of concurrent fetches
+    #[arg(long, default_value = "16", value_name = "N")]
+    pub jobs: NonZeroUsize,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Configured repository names; update all when omitted
+    pub repositories: Vec<String>,
+
+    /// Maximum number of concurrent fetches
+    #[arg(long, default_value = "16", value_name = "N")]
+    pub jobs: NonZeroUsize,
 
     #[command(flatten)]
     pub output: OutputArgs,
