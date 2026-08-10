@@ -69,7 +69,8 @@ All paths are relative to the directory containing `.forest.toml`.
 `repositories.root` contains the canonical clones. Each member is both its CLI
 name and its directory beneath that root. `repositories.remote` is optional for
 projects that provision repositories separately. It is required by `setup`
-when a canonical clone is missing.
+when a canonical clone is missing. Relative local remotes are resolved from the
+directory containing `.forest.toml`.
 
 The only supported placeholders are:
 
@@ -154,7 +155,9 @@ that is not a Git worktree or a missing repository without a configured remote
 prevents all cloning. If a clone fails after earlier repositories succeeded,
 the successful clones are preserved and later repositories are not run.
 Repeating the command safely reuses completed clones and resumes the rest.
-Forest never overwrites an existing path.
+Clones are completed in adjacent staging directories before being moved into
+the configured canonical paths, so an interrupted clone is never reused as a
+completed repository. Forest never overwrites an existing path.
 
 ### `repos`
 

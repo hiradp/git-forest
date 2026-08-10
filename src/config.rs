@@ -13,6 +13,7 @@ const CONFIG_FILE: &str = ".forest.toml";
 pub struct Config {
     pub workspaces_root: PathBuf,
     pub repositories: Vec<RepositoryConfig>,
+    pub config_dir: PathBuf,
     branch_template: String,
 }
 
@@ -128,6 +129,7 @@ impl Config {
         Ok(Self {
             workspaces_root,
             repositories,
+            config_dir: project_root,
             branch_template: raw.workspaces.branch,
         })
     }

@@ -1,6 +1,8 @@
 use std::fs;
-use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use tempfile::Builder;
 
 use crate::config::{Config, RepositoryConfig};
 use crate::domain::{
@@ -97,29 +99,7 @@ pub fn run(config: &Config, git: &Git) -> Result<CommandOutcome> {
                 });
             }
             Preflight::Clone { name, path, remote } => {
-                let result = path
-                    .parent()
-                    .ok_or_else(|| {
-                        format!("repository path {} has no parent directory", path.display())
-                    })
-                    .and_then(|parent| {
-                        fs::create_dir_all(parent).map_err(|error| {
-                            format!(
-                                "could not create repository root {}: {error}",
-                                parent.display()
-                            )
-                        })
-                    })
-                    .and_then(|()| {
-                        let output = git
-                            .clone_repository(&remote, &path)
-                            .map_err(|error| error.to_string())?;
-                        if output.status.success() {
-                            Ok(())
-                        } else {
-                            Err(failure_message(&output))
-                        }
-                    });
+                let result = clone_repository(git, &config.config_dir, &remote, &path);
 
                 let (status, message) = match result {
                     Ok(()) => (SetupStatus::Cloned, None),
@@ -146,6 +126,78 @@ pub fn run(config: &Config, git: &Git) -> Result<CommandOutcome> {
     })
 }
 
+fn clone_repository(
+    git: &Git,
+    working_directory: &Path,
+    remote: &str,
+    destination: &Path,
+) -> std::result::Result<(), String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "repository path {} has no parent directory",
+            destination.display()
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "could not create repository root {}: {error}",
+            parent.display()
+        )
+    })?;
+
+    let staging = Builder::new()
+        .prefix(".git-forest-clone-")
+        .tempdir_in(parent)
+        .map_err(|error| {
+            format!(
+                "could not create a clone staging directory in {}: {error}",
+                parent.display()
+            )
+        })?;
+    let output = git
+        .clone_repository(working_directory, remote, staging.path())
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(failure_message(&output));
+    }
+
+    publish_repository(staging.path(), destination).map_err(|error| {
+        format!(
+            "could not publish cloned repository at {}: {error}",
+            destination.display()
+        )
+    })
+}
+
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+fn publish_repository(source: &Path, destination: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+
+    renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE).map_err(Into::into)
+}
+
+#[cfg(target_os = "windows")]
+fn publish_repository(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "linux",
+    target_vendor = "apple",
+    target_os = "windows"
+)))]
+fn publish_repository(source: &Path, destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "cannot atomically rename {} to {} without replacing an existing path on this platform",
+            source.display(),
+            destination.display()
+        ),
+    ))
+}
+
 fn preflight_repository(git: &Git, repository: &RepositoryConfig) -> Result<Preflight> {
     match fs::symlink_metadata(&repository.path) {
         Ok(_) => {
@@ -166,7 +218,7 @@ fn preflight_repository(git: &Git, repository: &RepositoryConfig) -> Result<Pref
                 ))
             }
         }
-        Err(source) if source.kind() == ErrorKind::NotFound => {
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
             if let Some(remote) = &repository.remote {
                 Ok(Preflight::Clone {
                     name: repository.name.clone(),

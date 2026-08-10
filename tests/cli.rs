@@ -311,6 +311,28 @@ fn setup_clones_missing_canonical_repositories_and_is_idempotent() {
 }
 
 #[test]
+fn setup_resolves_relative_remotes_from_the_configuration_directory() {
+    let fixture = WorkspaceFixture::without_clones();
+    write_config_with_remote(
+        &fixture.root.join(".forest.toml"),
+        &["alpha", "beta", "gamma"],
+        Some("{name}-origin.git"),
+    );
+    let nested = fixture.root.join("src/nested");
+    fs::create_dir_all(&nested).unwrap();
+
+    let output = forest(&nested, &["setup", "--json"]);
+
+    assert_success(&output);
+    for name in ["alpha", "beta", "gamma"] {
+        assert_eq!(
+            git_stdout(&fixture.canonical(name), &["branch", "--show-current"]),
+            "main"
+        );
+    }
+}
+
+#[test]
 fn setup_preflights_every_repository_before_cloning() {
     let fixture = WorkspaceFixture::without_clones();
     let occupied = fixture.canonical("beta");
@@ -367,9 +389,20 @@ fn setup_reports_partial_clone_failure_and_resumes() {
     fs::write(
         &fake_git,
         r#"#!/bin/sh
+remote=""
 destination=""
-for argument in "$@"; do destination="$argument"; done
-if [ "$1" = "clone" ] && [ "$destination" = "$FAIL_REPO" ]; then
+after_separator=false
+for argument in "$@"; do
+  if [ "$after_separator" = true ] && [ -z "$remote" ]; then
+    remote="$argument"
+  fi
+  if [ "$argument" = "--" ]; then
+    after_separator=true
+  fi
+  destination="$argument"
+done
+if [ "$remote" = "$FAIL_REMOTE" ]; then
+  mkdir "$destination/.git"
   echo "simulated clone failure" >&2
   exit 1
 fi
@@ -389,10 +422,7 @@ exec "$REAL_GIT" "$@"
         .current_dir(&fixture.root)
         .env("PATH", command_path)
         .env("REAL_GIT", find_executable("git"))
-        .env(
-            "FAIL_REPO",
-            fixture.root.canonicalize().unwrap().join("src/beta"),
-        )
+        .env("FAIL_REMOTE", fixture.root.join("beta-origin.git"))
         .args(["setup", "--json"])
         .output()
         .unwrap();
@@ -405,7 +435,18 @@ exec "$REAL_GIT" "$@"
     assert!(fixture.canonical("alpha").exists());
     assert!(!fixture.canonical("beta").exists());
     assert!(!fixture.canonical("gamma").exists());
+    assert!(
+        fs::read_dir(fixture.root.join("src"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".git-forest-clone-"))
+    );
 
+    let interrupted_staging = fixture.root.join("src/.git-forest-clone-interrupted/.git");
+    fs::create_dir_all(interrupted_staging).unwrap();
     let resumed = forest(&fixture.root, &["setup", "--json"]);
 
     assert_success(&resumed);
@@ -413,6 +454,70 @@ exec "$REAL_GIT" "$@"
     assert_eq!(report["repositories"][0]["status"], "reused");
     assert_eq!(report["repositories"][1]["status"], "cloned");
     assert_eq!(report["repositories"][2]["status"], "cloned");
+}
+
+#[test]
+fn setup_does_not_publish_over_a_destination_created_during_clone() {
+    let fixture = WorkspaceFixture::without_clones();
+    let fake_bin = fixture.root.join("fake-publish-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        r#"#!/bin/sh
+remote=""
+after_separator=false
+for argument in "$@"; do
+  if [ "$after_separator" = true ] && [ -z "$remote" ]; then
+    remote="$argument"
+  fi
+  if [ "$argument" = "--" ]; then
+    after_separator=true
+  fi
+done
+"$REAL_GIT" "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$remote" = "$RACE_REMOTE" ]; then
+  mkdir "$PUBLISH_DESTINATION"
+fi
+exit "$status"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+    let destination = fixture.canonical("alpha");
+
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("REAL_GIT", find_executable("git"))
+        .env("RACE_REMOTE", fixture.root.join("alpha-origin.git"))
+        .env("PUBLISH_DESTINATION", &destination)
+        .args(["setup", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "failed");
+    assert_eq!(report["repositories"][1]["status"], "not_run");
+    assert_eq!(report["repositories"][2]["status"], "not_run");
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+    assert!(
+        fs::read_dir(fixture.root.join("src"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".git-forest-clone-"))
+    );
 }
 
 #[test]

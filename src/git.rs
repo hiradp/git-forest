@@ -285,9 +285,16 @@ impl Git {
         Ok(Ok(status.stdout.is_empty()))
     }
 
-    pub fn clone_repository(&self, remote: &str, destination: &Path) -> Result<Output> {
+    pub fn clone_repository(
+        &self,
+        working_directory: &Path,
+        remote: &str,
+        destination: &Path,
+    ) -> Result<Output> {
         let mut command = Command::new("git");
         command
+            .arg("-C")
+            .arg(working_directory)
             .arg("clone")
             .arg("--quiet")
             .arg("--no-recurse-submodules")
