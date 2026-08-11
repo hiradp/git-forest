@@ -339,7 +339,8 @@ Removal is deliberately conservative:
 - modified, untracked, and ignored files prevent removal;
 - every selected path must be registered with its configured canonical
   repository;
-- removal always uses `git worktree remove`;
+- removal always uses `git worktree remove`, including to clean up registered
+  worktrees whose paths are already missing;
 - branches are never deleted;
 - there is no force option;
 - the workspace directory is removed only when it is empty;

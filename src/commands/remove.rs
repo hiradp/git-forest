@@ -226,11 +226,10 @@ fn preflight_member(
         });
     }
     if !member.exists && member.registered {
-        return Ok(Preflight::Conflict {
+        return Ok(Preflight::Ready {
             name,
+            canonical_path: member.canonical_path.clone(),
             path,
-            message: "registered worktree is missing from disk; repair it with Git before removal"
-                .to_owned(),
         });
     }
     if member.exists && !member.registered {

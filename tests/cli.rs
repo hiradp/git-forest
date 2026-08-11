@@ -2114,6 +2114,39 @@ fn refuses_removal_when_only_ignored_files_are_present() {
 }
 
 #[test]
+fn removes_stale_registration_when_a_worktree_is_missing() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "stale", "alpha", "beta", "--json"],
+    ));
+    let missing = fixture.workspace("stale").join("alpha");
+    fs::remove_dir_all(&missing).unwrap();
+
+    let output = forest(&fixture.root, &["remove", "stale", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "removed");
+    assert_eq!(report["repositories"][1]["status"], "removed");
+    assert_eq!(report["workspace_removed"], true);
+    assert!(!fixture.workspace("stale").exists());
+    assert!(
+        !git_stdout(
+            &fixture.canonical("alpha"),
+            &["worktree", "list", "--porcelain"]
+        )
+        .contains(path(&missing))
+    );
+    for name in ["alpha", "beta"] {
+        git(
+            &fixture.canonical(name),
+            &["show-ref", "--verify", "--quiet", "refs/heads/test/stale"],
+        );
+    }
+}
+
+#[test]
 fn removes_clean_worktrees_preserves_branches_and_is_rerunnable() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(

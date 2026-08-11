@@ -120,7 +120,8 @@ Open an existing workspace in a running Herdr session.
 .BI remove " workspace [repository ...]"
 Remove all worktrees in a workspace or only the named repository worktrees.
 Removal rejects dirty or unregistered paths, uses
-.B git worktree remove,
+.B git worktree remove
+for present worktrees and stale registrations whose paths are already missing,
 preserves branches, and has no force option.
 .SH CONFIGURATION
 Forest reads a
