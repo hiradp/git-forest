@@ -128,6 +128,47 @@ Removal rejects dirty or unregistered paths, uses
 .B git worktree remove
 for present worktrees and stale registrations whose paths are already missing,
 preserves branches, and has no force option.
+.TP
+.BI completions " shell"
+Generate dynamic shell completion setup for
+.BR bash ,
+.BR elvish ,
+.BR fish ,
+.BR powershell ,
+or
+.BR zsh .
+This command does not require a Forest configuration.
+.SH SHELL COMPLETION
+Evaluate the generated setup from the shell startup file.
+For Bash or Zsh:
+.PP
+.EX
+source <(git-forest completions bash)
+.EE
+.PP
+Use
+.B zsh
+instead of
+.B bash
+for Zsh.
+For Fish:
+.PP
+.EX
+git-forest completions fish | source
+.EE
+.PP
+Bash, Zsh, and Fish complete both
+.B git-forest
+and
+.BR "git forest" .
+Dynamic candidates include configured repositories, existing workspaces, and
+workspace checkouts where appropriate.
+Completion honors normal configuration discovery,
+.BR FOREST_CONFIG ,
+and
+.BR \-\-config .
+It never contacts remotes, mutates worktrees, or invokes Herdr.
+Regenerate the setup after upgrading Forest.
 .SH CONFIGURATION
 Forest reads a
 .B .forest.toml

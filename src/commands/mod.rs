@@ -18,7 +18,9 @@ use crate::herdr::Herdr;
 
 pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Result<CommandOutcome> {
     match command {
-        Command::Open => unreachable!("the interactive launcher is dispatched by main"),
+        Command::Open | Command::Completions(_) => {
+            unreachable!("interactive and completion commands are dispatched by main")
+        }
         Command::Setup(_) => setup::run(config, git),
         Command::Repos(_) => repos::run(config, git)
             .map(CommandReport::Repositories)

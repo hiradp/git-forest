@@ -2542,6 +2542,223 @@ fn emits_json_for_usage_errors_when_requested() {
 }
 
 #[test]
+fn generates_dynamic_completion_setup_without_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        let output = forest(temp.path(), &["completions", shell]);
+
+        assert_success(&output);
+        let script = String::from_utf8(output.stdout).unwrap();
+        assert!(script.contains("git-forest"), "{shell}: {script}");
+        assert!(script.contains("FOREST_COMPLETE"), "{shell}: {script}");
+        match shell {
+            "bash" => assert!(script.contains("_git_forest"), "{shell}: {script}"),
+            "zsh" => {
+                assert!(
+                    script.contains("function _git_forest()"),
+                    "{shell}: {script}"
+                );
+                assert!(
+                    script.contains("function _git-forest()"),
+                    "{shell}: {script}"
+                );
+            }
+            "fish" => assert!(
+                script.contains("__fish_git_forest_complete"),
+                "{shell}: {script}"
+            ),
+            _ => {}
+        }
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn bash_setup_completes_the_git_style_invocation() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("logical-slots")).unwrap();
+    fs::create_dir_all(fixture.workspace("review-123")).unwrap();
+    let setup = forest(&fixture.root, &["completions", "bash"]);
+    assert_success(&setup);
+    let setup_path = fixture.root.join("forest-completion.bash");
+    fs::write(&setup_path, setup.stdout).unwrap();
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![Path::new(binary()).parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+    let output = Command::new("bash")
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("FOREST_TEST_COMPLETION_SETUP", setup_path)
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            r#"
+source "$FOREST_TEST_COMPLETION_SETUP"
+COMP_WORDS=(git forest attach log)
+COMP_CWORD=3
+COMP_TYPE=9
+__git_cmd_idx=1
+_git_forest
+printf '%s\n' "${COMPREPLY[@]}"
+"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "logical-slots\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn zsh_setup_completes_both_git_dispatch_conventions() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("stacked").join("alpha")).unwrap();
+    fs::create_dir_all(fixture.workspace("stacked").join("alpha@part-2")).unwrap();
+    let setup = forest(&fixture.root, &["completions", "zsh"]);
+    assert_success(&setup);
+    let setup_path = fixture.root.join("forest-completion.zsh");
+    fs::write(&setup_path, setup.stdout).unwrap();
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![Path::new(binary()).parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+    let output = Command::new("/bin/zsh")
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("FOREST_TEST_COMPLETION_SETUP", setup_path)
+        .args([
+            "-f",
+            "-c",
+            r#"
+compdef() { :; }
+_describe() {
+    local values_name=$3
+    print -l -- ${(P)values_name}
+}
+source "$FOREST_TEST_COMPLETION_SETUP"
+
+print underscore
+words=(git forest remove stacked a)
+CURRENT=5
+_git_forest
+
+print hyphen
+words=(forest remove stacked a)
+CURRENT=4
+_git-forest
+"#,
+        ])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "underscore\nalpha\nalpha@part-2\nhyphen\nalpha\nalpha@part-2\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn dynamically_completes_workspaces_for_attach() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("logical-slots")).unwrap();
+    fs::create_dir_all(fixture.workspace("review-123")).unwrap();
+
+    let candidates = completions(&fixture.root, &["git-forest", "attach", "log"]);
+
+    assert!(candidates.contains(&"logical-slots".to_owned()));
+    assert!(!candidates.contains(&"review-123".to_owned()));
+}
+
+#[test]
+fn dynamic_completion_honors_an_explicit_config() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("logical-slots")).unwrap();
+    let outside = fixture._temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let config = fixture.root.join(".forest.toml");
+
+    let candidates = completions(
+        &outside,
+        &["git-forest", "--config", path(&config), "attach", "log"],
+    );
+
+    assert!(candidates.contains(&"logical-slots".to_owned()));
+}
+
+#[test]
+fn dynamically_completes_configured_repositories_without_repeating_selections() {
+    let fixture = WorkspaceFixture::new();
+
+    let first = completions(&fixture.root, &["git-forest", "create", "topic", "a"]);
+    assert!(first.contains(&"alpha".to_owned()));
+
+    let remaining = completions(
+        &fixture.root,
+        &["git-forest", "create", "topic", "alpha", ""],
+    );
+    assert!(!remaining.contains(&"alpha".to_owned()));
+    assert!(remaining.contains(&"beta".to_owned()));
+    assert!(remaining.contains(&"gamma".to_owned()));
+}
+
+#[test]
+fn dynamically_completes_named_checkouts_for_remove() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("stacked").join("alpha")).unwrap();
+    fs::create_dir_all(fixture.workspace("stacked").join("alpha@part-2")).unwrap();
+    fs::create_dir_all(fixture.workspace("stacked").join("unexpected")).unwrap();
+
+    let candidates = completions(&fixture.root, &["git-forest", "remove", "stacked", "a"]);
+
+    assert!(candidates.contains(&"alpha".to_owned()));
+    assert!(candidates.contains(&"alpha@part-2".to_owned()));
+    assert!(!candidates.contains(&"unexpected".to_owned()));
+}
+
+#[test]
+fn dynamically_completes_stale_registered_worktrees_for_remove() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "stale-completion", "alpha@part-2", "--json"],
+    ));
+    let workspace = fixture.workspace("stale-completion");
+    fs::remove_dir_all(workspace.join("alpha@part-2")).unwrap();
+
+    let checkouts = completions(
+        &fixture.root,
+        &["git-forest", "remove", "stale-completion", "a"],
+    );
+    assert!(checkouts.contains(&"alpha@part-2".to_owned()));
+
+    fs::remove_dir(&workspace).unwrap();
+    let workspaces = completions(&fixture.root, &["git-forest", "remove", "sta"]);
+    assert!(workspaces.contains(&"stale-completion".to_owned()));
+}
+
+#[test]
+fn missing_configuration_produces_no_dynamic_value_candidates() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let candidates = completions(temp.path(), &["git-forest", "attach", "log"]);
+
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.starts_with('-'))
+    );
+}
+
+#[test]
 fn no_subcommand_prints_help_when_not_attached_to_a_terminal() {
     let output = Command::new(binary()).output().unwrap();
 
@@ -2738,6 +2955,25 @@ fn forest(current_dir: &Path, arguments: &[&str]) -> Output {
         .args(arguments)
         .output()
         .unwrap()
+}
+
+fn completions(current_dir: &Path, arguments: &[&str]) -> Vec<String> {
+    let output = Command::new(binary())
+        .current_dir(current_dir)
+        .env_remove("FOREST_CONFIG")
+        .env("FOREST_COMPLETE", "fish")
+        .arg("--")
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(output.stderr.is_empty());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_once('\t').map_or(line, |(value, _)| value))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn binary() -> &'static str {

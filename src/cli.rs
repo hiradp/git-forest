@@ -2,15 +2,22 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
+use clap_complete::ArgValueCompleter;
 
+use crate::completion;
 use crate::config::CheckoutId;
 
 #[derive(Debug, Parser)]
 #[command(name = "git-forest", version, about)]
 pub struct Cli {
     /// Use an explicit configuration file instead of discovery
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        value_hint = ValueHint::FilePath
+    )]
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -60,6 +67,9 @@ pub enum Command {
 
     /// Remove worktrees from a workspace
     Remove(RemoveArgs),
+
+    /// Generate dynamic shell completion setup
+    Completions(CompletionsArgs),
 }
 
 impl Command {
@@ -74,8 +84,26 @@ impl Command {
             Self::Path(args) => args.output.json,
             Self::Attach(args) => args.output.json,
             Self::Remove(args) => args.output.json,
+            Self::Completions(_) => false,
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Shell for which to generate completion setup
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    #[value(name = "powershell", alias = "pwsh")]
+    PowerShell,
+    Zsh,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -88,6 +116,7 @@ pub struct OutputArgs {
 #[derive(Debug, Args)]
 pub struct FetchArgs {
     /// Configured repository names; fetch all when omitted
+    #[arg(add = ArgValueCompleter::new(completion::repositories))]
     pub repositories: Vec<String>,
 
     /// Maximum number of concurrent fetches
@@ -101,6 +130,7 @@ pub struct FetchArgs {
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
     /// Configured repository names; update all when omitted
+    #[arg(add = ArgValueCompleter::new(completion::repositories))]
     pub repositories: Vec<String>,
 
     /// Maximum number of concurrent fetches
@@ -114,10 +144,15 @@ pub struct UpdateArgs {
 #[derive(Debug, Args)]
 pub struct CreateArgs {
     /// Workspace name
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
     /// Configured repository checkouts in REPOSITORY[@SLOT] form
-    #[arg(required = true, num_args = 1..)]
+    #[arg(
+        required = true,
+        num_args = 1..,
+        add = ArgValueCompleter::new(completion::checkouts)
+    )]
     pub checkouts: Vec<CheckoutId>,
 
     /// Override a checkout's creation base
@@ -185,6 +220,7 @@ impl FromStr for BranchOverride {
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Limit status to one workspace
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: Option<String>,
 
     #[command(flatten)]
@@ -193,6 +229,7 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct PathArgs {
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
     #[command(flatten)]
@@ -202,6 +239,7 @@ pub struct PathArgs {
 #[derive(Debug, Args)]
 pub struct AttachArgs {
     /// Workspace name
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
     #[command(flatten)]
@@ -210,9 +248,11 @@ pub struct AttachArgs {
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
     /// Remove only these repository checkouts
+    #[arg(add = ArgValueCompleter::new(completion::checkouts))]
     pub checkouts: Vec<CheckoutId>,
 
     #[command(flatten)]

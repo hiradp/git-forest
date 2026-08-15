@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod completion;
 mod config;
 mod domain;
 mod error;
@@ -20,6 +21,8 @@ use crate::git::Git;
 use crate::herdr::Herdr;
 
 fn main() -> ExitCode {
+    completion::handle_environment();
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -58,6 +61,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<u8> {
+    if let Some(Command::Completions(arguments)) = cli.command.as_ref() {
+        completion::write_registration(arguments.shell)?;
+        return Ok(0);
+    }
+
     let interactive = cli.command.is_none() || matches!(cli.command, Some(Command::Open));
     if interactive && !launcher::is_interactive_terminal() {
         return Err(AppError::InvalidInput(

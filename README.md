@@ -49,6 +49,43 @@ Cargo itself installs only executables. If you instead run
 for command-line help; `git forest --help` requires the manual installed by the
 `just` recipe.
 
+## Shell completion
+
+Forest generates shell setup that calls back into the executable for dynamic
+completion. Add the command for your shell to its startup file:
+
+For Bash, add this to `~/.bashrc`:
+
+```sh
+source <(git-forest completions bash)
+```
+
+For Zsh, add this to `~/.zshrc`:
+
+```sh
+source <(git-forest completions zsh)
+```
+
+For Fish, add this to `~/.config/fish/config.fish`:
+
+```fish
+git-forest completions fish | source
+```
+
+For Elvish, use `eval (git-forest completions elvish | slurp)`. For
+PowerShell, use
+`git-forest completions powershell | Out-String | Invoke-Expression`.
+Keep the generator invocation in the startup file rather than saving its
+output because the completion protocol is version-dependent.
+
+Bash, Zsh, and Fish setup completes both `git-forest` and `git forest`.
+Completion includes commands and options, configured repository names, existing
+workspace names for commands such as `attach`, and existing primary and named
+checkouts for `remove`. It honors normal configuration discovery,
+`FOREST_CONFIG`, and `--config`. Completion is read-only: it does not contact
+remotes, mutate worktrees, or invoke Herdr. Invalid or missing configuration
+simply produces no configuration-dependent candidates.
+
 ## Configuration
 
 `git-forest` reads a `.forest.toml`:
@@ -119,6 +156,7 @@ git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
 git forest remove <workspace> [<checkout>...] [--json]
+git forest completions <shell>
 ```
 
 Global options:
