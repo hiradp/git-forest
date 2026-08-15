@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::{Config, RepositoryConfig};
+use crate::config::{CheckoutId, Config, RepositoryConfig};
 use crate::error::{AppError, Result};
 use crate::git::{Git, Worktree};
 
@@ -18,7 +18,7 @@ pub struct WorkspaceState {
 
 #[derive(Debug)]
 pub struct MemberState {
-    pub name: String,
+    pub id: CheckoutId,
     pub canonical_path: PathBuf,
     pub path: PathBuf,
     pub exists: bool,
@@ -130,6 +130,7 @@ fn build_workspace(
         .iter()
         .map(|repository| repository.name.as_str())
         .collect::<HashSet<_>>();
+    let mut filesystem_checkouts = BTreeMap::new();
     let mut unexpected_entries = Vec::new();
     if exists {
         let entries = fs::read_dir(&path).map_err(|source| AppError::Filesystem {
@@ -141,11 +142,14 @@ fn build_workspace(
                 context: format!("could not read an entry in {}", path.display()),
                 source,
             })?;
-            if !entry
+            let checkout = entry
                 .file_name()
                 .to_str()
-                .is_some_and(|entry_name| configured_names.contains(entry_name))
-            {
+                .and_then(|name| name.parse::<CheckoutId>().ok())
+                .filter(|checkout| configured_names.contains(checkout.repository.as_str()));
+            if let Some(checkout) = checkout {
+                filesystem_checkouts.insert(checkout, entry.path());
+            } else {
                 unexpected_entries.push(entry.path());
             }
         }
@@ -154,41 +158,42 @@ fn build_workspace(
 
     let mut members = Vec::new();
     for registry in registries {
-        let destination = path.join(&registry.repository.name);
-        let expected_metadata = registry
-            .worktrees
-            .iter()
-            .find(|worktree| paths_match(&worktree.path, &destination))
-            .cloned();
-        let mut unexpected_worktrees = registry
-            .worktrees
-            .iter()
-            .filter(|worktree| {
-                workspace_name_for_path(&worktree.path, &config.workspaces_root).as_deref()
-                    == Some(name.as_str())
-                    && !paths_match(&worktree.path, &destination)
-            })
+        let mut checkout_ids = filesystem_checkouts
+            .keys()
+            .filter(|checkout| checkout.repository == registry.repository.name)
             .cloned()
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
+        let mut metadata_by_checkout = BTreeMap::new();
+        let mut unexpected_worktrees = Vec::new();
+
+        for worktree in &registry.worktrees {
+            if workspace_name_for_path(&worktree.path, &config.workspaces_root).as_deref()
+                != Some(name.as_str())
+            {
+                continue;
+            }
+            match checkout_for_path(&worktree.path, &path) {
+                Some(checkout) if checkout.repository == registry.repository.name => {
+                    checkout_ids.insert(checkout.clone());
+                    if metadata_by_checkout
+                        .insert(checkout, worktree.clone())
+                        .is_some()
+                    {
+                        unexpected_worktrees.push(worktree.clone());
+                    }
+                }
+                _ => unexpected_worktrees.push(worktree.clone()),
+            }
+        }
         unexpected_worktrees.sort_by(|left, right| left.path.cmp(&right.path));
-        let unexpected_worktree_paths = unexpected_worktrees
-            .iter()
-            .map(|worktree| worktree.path.clone())
-            .collect::<Vec<_>>();
 
-        let destination_exists = destination.exists();
-        let (member_path, metadata) = if destination_exists || expected_metadata.is_some() {
-            (destination.clone(), expected_metadata)
-        } else if let Some(worktree) = unexpected_worktrees.first() {
-            (worktree.path.clone(), Some(worktree.clone()))
-        } else {
-            (destination.clone(), None)
-        };
-        let member_exists = member_path.exists();
-
-        if member_exists || metadata.is_some() || !unexpected_worktree_paths.is_empty() {
+        let member_start = members.len();
+        for checkout in checkout_ids {
+            let destination = path.join(checkout.to_string());
+            let metadata = metadata_by_checkout.remove(&checkout);
+            let member_exists = destination.exists();
             let mut member_inconsistencies = Vec::new();
-            if destination_exists && metadata.is_none() {
+            if member_exists && metadata.is_none() {
                 member_inconsistencies.push(format!(
                     "{} is not registered with canonical repository {}",
                     destination.display(),
@@ -197,29 +202,62 @@ fn build_workspace(
             } else if !member_exists && metadata.is_some() {
                 member_inconsistencies.push("registered worktree is missing from disk".to_owned());
             }
-            for unexpected_path in &unexpected_worktree_paths {
-                let message = format!(
-                    "repository {} has a registered worktree at {}; expected {}",
-                    registry.repository.name,
-                    unexpected_path.display(),
-                    destination.display()
-                );
-                member_inconsistencies.push(message.clone());
-                inconsistencies.push(message);
-            }
             if let Some(issue) = &registry.issue {
                 member_inconsistencies.push(issue.clone());
             }
             members.push(MemberState {
-                name: registry.repository.name.clone(),
+                id: checkout,
                 canonical_path: registry.repository.path.clone(),
-                path: member_path,
+                path: destination,
                 exists: member_exists,
                 registered: metadata.is_some(),
                 metadata,
-                unexpected_worktree_paths,
+                unexpected_worktree_paths: Vec::new(),
                 inconsistencies: member_inconsistencies,
             });
+        }
+
+        if !unexpected_worktrees.is_empty() {
+            let unexpected_worktree_paths = unexpected_worktrees
+                .iter()
+                .map(|worktree| worktree.path.clone())
+                .collect::<Vec<_>>();
+            let messages = unexpected_worktree_paths
+                .iter()
+                .map(|unexpected_path| {
+                    let message = format!(
+                        "repository {} has a registered worktree at {}; expected a direct child named {} or {}@<slot>",
+                        registry.repository.name,
+                        unexpected_path.display(),
+                        registry.repository.name,
+                        registry.repository.name,
+                    );
+                    inconsistencies.push(message.clone());
+                    message
+                })
+                .collect::<Vec<_>>();
+
+            if member_start == members.len() {
+                let worktree = unexpected_worktrees.remove(0);
+                let mut member_inconsistencies = messages;
+                if let Some(issue) = &registry.issue {
+                    member_inconsistencies.push(issue.clone());
+                }
+                members.push(MemberState {
+                    id: CheckoutId::primary(&registry.repository.name),
+                    canonical_path: registry.repository.path.clone(),
+                    exists: worktree.path.exists(),
+                    registered: true,
+                    path: worktree.path.clone(),
+                    metadata: Some(worktree),
+                    unexpected_worktree_paths,
+                    inconsistencies: member_inconsistencies,
+                });
+            } else {
+                let member = &mut members[member_start];
+                member.unexpected_worktree_paths = unexpected_worktree_paths;
+                member.inconsistencies.extend(messages);
+            }
         }
     }
 
@@ -245,6 +283,21 @@ fn build_workspace(
     })
 }
 
+fn checkout_for_path(path: &Path, workspace_path: &Path) -> Option<CheckoutId> {
+    let relative = path.strip_prefix(workspace_path).ok().or_else(|| {
+        let canonical_workspace = workspace_path.canonicalize().ok()?;
+        path.strip_prefix(canonical_workspace).ok()
+    })?;
+    let mut components = relative.components();
+    let Component::Normal(name) = components.next()? else {
+        return None;
+    };
+    if components.next().is_some() {
+        return None;
+    }
+    name.to_str()?.parse().ok()
+}
+
 fn workspace_name_for_path(path: &Path, workspace_root: &Path) -> Option<String> {
     let relative = path.strip_prefix(workspace_root).ok().or_else(|| {
         let canonical_root = workspace_root.canonicalize().ok()?;
@@ -254,12 +307,4 @@ fn workspace_name_for_path(path: &Path, workspace_root: &Path) -> Option<String>
         Component::Normal(name) => name.to_str().map(str::to_owned),
         _ => None,
     }
-}
-
-pub fn paths_match(left: &Path, right: &Path) -> bool {
-    left == right
-        || match (left.canonicalize(), right.canonicalize()) {
-            (Ok(left), Ok(right)) => left == right,
-            _ => false,
-        }
 }

@@ -69,7 +69,7 @@ pub fn run(
             return Err(AppError::Operational(format!(
                 "workspace {:?} has an inconsistent repository {:?}: {}",
                 arguments.workspace,
-                member.name,
+                member.id,
                 member.inconsistencies.join("; ")
             )));
         }
@@ -87,17 +87,14 @@ pub fn run(
         name: MAIN_ROLE.to_owned(),
         path: identity_path.clone(),
     }];
-    for repository in &config.repositories {
-        let Some(member) = state
-            .members
-            .iter()
-            .find(|member| member.name == repository.name && member.exists && member.registered)
-        else {
+    for member in &state.members {
+        if !member.exists || !member.registered {
             continue;
-        };
+        }
+        let checkout = member.id.to_string();
         desired_tabs.push(DesiredTab {
-            role: format!("repository:{}", repository.name),
-            name: repository.name.clone(),
+            role: format!("repository:{checkout}"),
+            name: checkout,
             path: canonicalize(&member.path, "repository worktree")?,
         });
     }

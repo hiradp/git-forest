@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::RemoveArgs;
-use crate::config::Config;
+use crate::config::{CheckoutId, Config};
 use crate::domain::{
     CommandOutcome, CommandReport, RemovalStatus, RepositoryRemoval, WorkspaceRemovalReport,
 };
@@ -14,16 +14,16 @@ use crate::workspace::{self, MemberState};
 #[derive(Debug)]
 enum Preflight {
     Ready {
-        name: String,
+        checkout: CheckoutId,
         canonical_path: PathBuf,
         path: PathBuf,
     },
     AlreadyAbsent {
-        name: String,
+        checkout: CheckoutId,
         path: PathBuf,
     },
     Conflict {
-        name: String,
+        checkout: CheckoutId,
         path: PathBuf,
         message: String,
     },
@@ -31,37 +31,37 @@ enum Preflight {
 
 pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<CommandOutcome> {
     let workspace_path = config.workspace_path(&arguments.workspace)?;
-    let requested = validate_requested(config, &arguments.repositories)?;
+    let requested = validate_requested(config, &arguments.checkouts)?;
     let mut states = workspace::scan(config, git)?;
     let state = states
         .drain(..)
         .find(|workspace| workspace.name == arguments.workspace);
 
     let selected = if requested.is_empty() {
-        config
-            .repositories
-            .iter()
-            .filter(|repository| {
-                state.as_ref().is_some_and(|workspace| {
-                    workspace
-                        .members
-                        .iter()
-                        .any(|member| member.name == repository.name)
-                })
+        state
+            .as_ref()
+            .map(|workspace| {
+                workspace
+                    .members
+                    .iter()
+                    .map(|member| member.id.clone())
+                    .collect::<Vec<_>>()
             })
-            .map(|repository| repository.name.clone())
-            .collect::<Vec<_>>()
+            .unwrap_or_default()
     } else {
         requested
     };
 
     let mut preflight = Vec::with_capacity(selected.len());
-    for name in selected {
-        let path = workspace_path.join(&name);
-        let member = state
-            .as_ref()
-            .and_then(|workspace| workspace.members.iter().find(|member| member.name == name));
-        preflight.push(preflight_member(git, name, path, member)?);
+    for checkout in selected {
+        let path = workspace_path.join(checkout.to_string());
+        let member = state.as_ref().and_then(|workspace| {
+            workspace
+                .members
+                .iter()
+                .find(|member| member.id == checkout)
+        });
+        preflight.push(preflight_member(git, checkout, path, member)?);
     }
 
     if preflight
@@ -71,28 +71,20 @@ pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<Command
         let repositories = preflight
             .into_iter()
             .map(|item| match item {
-                Preflight::Ready { name, path, .. } => RepositoryRemoval {
-                    name,
+                Preflight::Ready { checkout, path, .. } => removal_report(
+                    checkout,
                     path,
-                    status: RemovalStatus::NotRun,
-                    message: Some("not run because workspace preflight failed".to_owned()),
-                },
-                Preflight::AlreadyAbsent { name, path } => RepositoryRemoval {
-                    name,
-                    path,
-                    status: RemovalStatus::AlreadyAbsent,
-                    message: None,
-                },
+                    RemovalStatus::NotRun,
+                    Some("not run because workspace preflight failed".to_owned()),
+                ),
+                Preflight::AlreadyAbsent { checkout, path } => {
+                    removal_report(checkout, path, RemovalStatus::AlreadyAbsent, None)
+                }
                 Preflight::Conflict {
-                    name,
+                    checkout,
                     path,
                     message,
-                } => RepositoryRemoval {
-                    name,
-                    path,
-                    status: RemovalStatus::Conflict,
-                    message: Some(message),
-                },
+                } => removal_report(checkout, path, RemovalStatus::Conflict, Some(message)),
             })
             .collect();
         return Ok(CommandOutcome {
@@ -111,43 +103,36 @@ pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<Command
     let mut repositories = Vec::with_capacity(preflight.len());
     for item in preflight {
         match item {
-            Preflight::AlreadyAbsent { name, path } => repositories.push(RepositoryRemoval {
-                name,
+            Preflight::AlreadyAbsent { checkout, path } => repositories.push(removal_report(
+                checkout,
                 path,
-                status: RemovalStatus::AlreadyAbsent,
-                message: None,
-            }),
+                RemovalStatus::AlreadyAbsent,
+                None,
+            )),
+            Preflight::Ready { checkout, path, .. } if failed => {
+                repositories.push(removal_report(
+                    checkout,
+                    path,
+                    RemovalStatus::NotRun,
+                    Some("not run because an earlier checkout failed".to_owned()),
+                ));
+            }
             Preflight::Ready {
-                name,
-                canonical_path: _,
-                path,
-            } if failed => repositories.push(RepositoryRemoval {
-                name,
-                path,
-                status: RemovalStatus::NotRun,
-                message: Some("not run because an earlier repository failed".to_owned()),
-            }),
-            Preflight::Ready {
-                name,
+                checkout,
                 canonical_path,
                 path,
             } => {
                 let output = git.remove_worktree(&canonical_path, &path)?;
                 if output.status.success() {
-                    repositories.push(RepositoryRemoval {
-                        name,
-                        path,
-                        status: RemovalStatus::Removed,
-                        message: None,
-                    });
+                    repositories.push(removal_report(checkout, path, RemovalStatus::Removed, None));
                 } else {
                     failed = true;
-                    repositories.push(RepositoryRemoval {
-                        name,
+                    repositories.push(removal_report(
+                        checkout,
                         path,
-                        status: RemovalStatus::Failed,
-                        message: Some(failure_message(&output)),
-                    });
+                        RemovalStatus::Failed,
+                        Some(failure_message(&output)),
+                    ));
                 }
             }
             Preflight::Conflict { .. } => unreachable!("conflicts were handled above"),
@@ -183,31 +168,57 @@ pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<Command
     })
 }
 
-fn validate_requested(config: &Config, repositories: &[String]) -> Result<Vec<String>> {
+fn removal_report(
+    checkout: CheckoutId,
+    path: PathBuf,
+    status: RemovalStatus,
+    message: Option<String>,
+) -> RepositoryRemoval {
+    RepositoryRemoval {
+        name: checkout.repository.clone(),
+        checkout: checkout.to_string(),
+        slot: checkout.slot,
+        path,
+        status,
+        message,
+    }
+}
+
+fn validate_requested(config: &Config, checkouts: &[CheckoutId]) -> Result<Vec<CheckoutId>> {
     let mut seen = HashSet::new();
-    for name in repositories {
-        if config.repository(name).is_none() {
+    let mut destinations = HashMap::new();
+    for checkout in checkouts {
+        if config.repository(&checkout.repository).is_none() {
             return Err(AppError::InvalidInput(format!(
-                "unknown repository {name:?}"
+                "unknown repository {:?}",
+                checkout.repository
             )));
         }
-        if !seen.insert(name.as_str()) {
+        if !seen.insert(checkout) {
             return Err(AppError::InvalidInput(format!(
-                "repository {name:?} was requested more than once"
+                "checkout {:?} was requested more than once",
+                checkout.to_string()
+            )));
+        }
+        let path_key = checkout.to_string().to_ascii_lowercase();
+        if let Some(existing) = destinations.insert(path_key, checkout.to_string()) {
+            return Err(AppError::InvalidInput(format!(
+                "checkouts {existing:?} and {:?} may resolve to the same destination on a case-insensitive filesystem",
+                checkout.to_string()
             )));
         }
     }
-    Ok(repositories.to_vec())
+    Ok(checkouts.to_vec())
 }
 
 fn preflight_member(
     git: &Git,
-    name: String,
+    checkout: CheckoutId,
     path: PathBuf,
     member: Option<&MemberState>,
 ) -> Result<Preflight> {
     let Some(member) = member else {
-        return Ok(Preflight::AlreadyAbsent { name, path });
+        return Ok(Preflight::AlreadyAbsent { checkout, path });
     };
     if let Some(actual_path) = member.unexpected_worktree_paths.first() {
         let actual_paths = member
@@ -217,7 +228,7 @@ fn preflight_member(
             .collect::<Vec<_>>()
             .join(", ");
         return Ok(Preflight::Conflict {
-            name,
+            checkout,
             path: actual_path.clone(),
             message: format!(
                 "registered worktree layout does not match: found {actual_paths}; expected {}",
@@ -227,36 +238,36 @@ fn preflight_member(
     }
     if !member.exists && member.registered {
         return Ok(Preflight::Ready {
-            name,
+            checkout,
             canonical_path: member.canonical_path.clone(),
             path,
         });
     }
     if member.exists && !member.registered {
         return Ok(Preflight::Conflict {
-            name,
+            checkout,
             path,
             message: "path exists but is not registered with the configured canonical repository"
                 .to_owned(),
         });
     }
     if !member.exists {
-        return Ok(Preflight::AlreadyAbsent { name, path });
+        return Ok(Preflight::AlreadyAbsent { checkout, path });
     }
 
     match git.is_clean_for_removal(&member.path)? {
         Ok(false) => Ok(Preflight::Conflict {
-            name,
+            checkout,
             path,
             message: "worktree has modified, untracked, or ignored files".to_owned(),
         }),
         Ok(true) => Ok(Preflight::Ready {
-            name,
+            checkout,
             canonical_path: member.canonical_path.clone(),
             path,
         }),
         Err(message) => Ok(Preflight::Conflict {
-            name,
+            checkout,
             path,
             message: format!("could not inspect worktree before removal: {message}"),
         }),

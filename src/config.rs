@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 use serde::Deserialize;
 
@@ -22,6 +24,54 @@ pub struct RepositoryConfig {
     pub name: String,
     pub path: PathBuf,
     pub remote: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CheckoutId {
+    pub repository: String,
+    pub slot: Option<String>,
+}
+
+impl CheckoutId {
+    pub fn primary(repository: impl Into<String>) -> Self {
+        Self {
+            repository: repository.into(),
+            slot: None,
+        }
+    }
+}
+
+impl fmt::Display for CheckoutId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.repository)?;
+        if let Some(slot) = &self.slot {
+            write!(formatter, "@{slot}")?;
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for CheckoutId {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (repository, slot) = match value.split_once('@') {
+            Some((repository, slot)) => (repository, Some(slot)),
+            None => (value, None),
+        };
+        if let Some(message) = component_error(repository, "repository name") {
+            return Err(format!("invalid checkout {value:?}: {message}"));
+        }
+        if let Some(slot) = slot
+            && let Some(message) = component_error(slot, "checkout slot")
+        {
+            return Err(format!("invalid checkout {value:?}: {message}"));
+        }
+        Ok(Self {
+            repository: repository.to_owned(),
+            slot: slot.map(str::to_owned),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +132,7 @@ impl Config {
             )));
         }
 
-        validate_template(&raw.workspaces.branch, "workspaces.branch", "workspace")?;
+        validate_branch_template(&raw.workspaces.branch)?;
         if let Some(remote) = &raw.repositories.remote {
             validate_template(remote, "repositories.remote", "name")?;
         }
@@ -140,9 +190,13 @@ impl Config {
             .find(|repository| repository.name == name)
     }
 
-    pub fn branch_for(&self, workspace: &str) -> Result<String> {
+    pub fn branch_for_checkout(&self, workspace: &str, checkout: &CheckoutId) -> Result<String> {
         validate_workspace_name(workspace)?;
-        Ok(self.branch_template.replace("{workspace}", workspace))
+        let checkout_name = checkout.slot.as_deref().unwrap_or(workspace);
+        Ok(self
+            .branch_template
+            .replace("{workspace}", workspace)
+            .replace("{checkout}", checkout_name))
     }
 
     pub fn workspace_path(&self, workspace: &str) -> Result<PathBuf> {
@@ -241,6 +295,33 @@ fn component_error(value: &str, label: &str) -> Option<String> {
     }
 
     (value == "." || value == "..").then(|| format!("invalid {label} {value:?}"))
+}
+
+fn validate_branch_template(template: &str) -> Result<()> {
+    const FIELD: &str = "workspaces.branch";
+    if template.is_empty() {
+        return Err(AppError::InvalidConfig(format!(
+            "{FIELD} must not be empty"
+        )));
+    }
+
+    let placeholders = placeholders(template, FIELD)?;
+    for placeholder in &placeholders {
+        if !matches!(*placeholder, "workspace" | "checkout") {
+            return Err(AppError::InvalidConfig(format!(
+                "unknown placeholder {{{placeholder}}} in {FIELD}"
+            )));
+        }
+    }
+    if !placeholders
+        .iter()
+        .any(|placeholder| matches!(*placeholder, "workspace" | "checkout"))
+    {
+        return Err(AppError::InvalidConfig(format!(
+            "{FIELD} must contain {{workspace}} or {{checkout}}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_template(template: &str, field: &str, required: &str) -> Result<()> {
@@ -348,6 +429,43 @@ mod tests {
             config.workspaces_root,
             Path::new("/project/src/.workspaces")
         );
+    }
+
+    #[test]
+    fn renders_primary_and_named_checkout_branches() {
+        let mut raw = raw_config(&["repo"]);
+        raw.workspaces.branch = "user/{checkout}".to_owned();
+        let config = Config::from_raw(PathBuf::from("/project/.forest.toml"), raw).unwrap();
+
+        assert_eq!(
+            config
+                .branch_for_checkout("stacked", &CheckoutId::primary("repo"))
+                .unwrap(),
+            "user/stacked"
+        );
+        assert_eq!(
+            config
+                .branch_for_checkout("stacked", &"repo@part-2".parse().unwrap())
+                .unwrap(),
+            "user/part-2"
+        );
+    }
+
+    #[test]
+    fn parses_checkout_ids() {
+        let primary = "api".parse::<CheckoutId>().unwrap();
+        assert_eq!(primary.repository, "api");
+        assert_eq!(primary.slot, None);
+        assert_eq!(primary.to_string(), "api");
+
+        let named = "api@part-2".parse::<CheckoutId>().unwrap();
+        assert_eq!(named.repository, "api");
+        assert_eq!(named.slot.as_deref(), Some("part-2"));
+        assert_eq!(named.to_string(), "api@part-2");
+
+        for invalid in ["", "@part-2", "api@", "api@part/two", "api@part@two"] {
+            assert!(invalid.parse::<CheckoutId>().is_err(), "{invalid:?}");
+        }
     }
 
     #[test]

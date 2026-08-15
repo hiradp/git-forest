@@ -94,6 +94,8 @@ pub struct WorkspaceChangeReport {
 #[derive(Debug, Serialize)]
 pub struct RepositoryChangeReport {
     pub name: String,
+    pub checkout: String,
+    pub slot: Option<String>,
     pub path: PathBuf,
     pub branch: String,
     pub base_ref: Option<String>,
@@ -138,6 +140,8 @@ pub struct WorkspaceListEntry {
 #[derive(Debug, Serialize)]
 pub struct WorkspaceListRepository {
     pub name: String,
+    pub checkout: String,
+    pub slot: Option<String>,
     pub path: PathBuf,
     pub exists: bool,
     pub registered: bool,
@@ -164,6 +168,8 @@ pub struct WorkspaceStatusEntry {
 #[derive(Debug, Serialize)]
 pub struct RepositoryStatus {
     pub name: String,
+    pub checkout: String,
+    pub slot: Option<String>,
     pub path: PathBuf,
     pub exists: bool,
     pub registered: bool,
@@ -220,6 +226,8 @@ pub struct WorkspaceRemovalReport {
 #[derive(Debug, Serialize)]
 pub struct RepositoryRemoval {
     pub name: String,
+    pub checkout: String,
+    pub slot: Option<String>,
     pub path: PathBuf,
     pub status: RemovalStatus,
     pub message: Option<String>,

@@ -84,18 +84,23 @@ Use
 .BI \-\-jobs " N"
 to limit concurrent fetches.
 .TP
-.BI create " workspace repository ..."
+.BI create " workspace checkout ..."
 Create a workspace and linked worktrees.
+A checkout is
+.B repository
+for its primary worktree or
+.B repository@slot
+for an additional worktree from the same repository.
 Use
-.BI \-\-base " repository=ref"
+.BI \-\-base " checkout=ref"
 to override a creation base and
-.BI \-\-branch " repository=branch"
+.BI \-\-branch " checkout=branch"
 to select an existing local branch or create one from its remote-tracking ref.
-Creation preflights every requested repository before mutation and is safe to
+Creation preflights every requested checkout before mutation and is safe to
 repeat after partial execution.
 .TP
-.BI add " workspace repository ..."
-Add linked worktrees to an existing workspace.
+.BI add " workspace checkout ..."
+Add primary or named linked worktrees to an existing workspace.
 It accepts the same
 .B \-\-base
 and
@@ -117,8 +122,8 @@ Print the absolute path of an existing workspace.
 .BI attach " workspace"
 Open an existing workspace in a running Herdr session.
 .TP
-.BI remove " workspace [repository ...]"
-Remove all worktrees in a workspace or only the named repository worktrees.
+.BI remove " workspace [checkout ...]"
+Remove all worktrees in a workspace or only the named checkouts.
 Removal rejects dirty or unregistered paths, uses
 .B git worktree remove
 for present worktrees and stale registrations whose paths are already missing,
@@ -138,7 +143,10 @@ Paths in the file are relative to the directory containing it.
 The repository remote template may use
 .BR {name} ,
 and the workspace branch template may use
-.BR {workspace} .
+.B {workspace}
+and
+.BR {checkout} .
+The latter is the named slot when present and otherwise the workspace name.
 See the git-forest README for the complete format and policy.
 .SH ENVIRONMENT
 .TP

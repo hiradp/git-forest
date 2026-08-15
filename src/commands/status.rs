@@ -72,7 +72,9 @@ fn repository_status(git: &Git, member: MemberState) -> Result<RepositoryStatus>
     }
 
     Ok(RepositoryStatus {
-        name: member.name,
+        name: member.id.repository.clone(),
+        checkout: member.id.to_string(),
+        slot: member.id.slot,
         path: member.path,
         exists: member.exists,
         registered: member.registered,

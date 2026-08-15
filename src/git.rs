@@ -153,6 +153,7 @@ impl Git {
         &self,
         repository: &Path,
         branch: &str,
+        ignore_case: bool,
     ) -> Result<Option<String>> {
         let output = self.run(
             repository,
@@ -168,13 +169,7 @@ impl Git {
         Ok(text(&output.stdout)
             .lines()
             .find(|existing| {
-                *existing != branch
-                    && (branch
-                        .strip_prefix(*existing)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-                        || existing
-                            .strip_prefix(branch)
-                            .is_some_and(|suffix| suffix.starts_with('/')))
+                *existing != branch && branch_names_conflict(existing, branch, ignore_case)
             })
             .map(str::to_owned))
     }
@@ -285,6 +280,34 @@ impl Git {
                 })
             })
             .map(|path| String::from_utf8_lossy(path).into_owned()))
+    }
+
+    pub fn ref_names_ignore_case(&self, repository: &Path) -> Result<bool> {
+        let output = self.run(
+            repository,
+            ["config", "--local", "--get", "extensions.refStorage"],
+        )?;
+        let storage = if output.status.success() {
+            Some(text(&output.stdout))
+        } else if output.stderr.is_empty() {
+            None
+        } else {
+            return Err(AppError::Git {
+                context: format!("could not inspect ref storage in {}", repository.display()),
+                message: failure_message(&output),
+            });
+        };
+        match storage.as_deref() {
+            Some(storage) if storage.eq_ignore_ascii_case("reftable") => Ok(false),
+            Some(storage) if storage.eq_ignore_ascii_case("files") => {
+                self.repository_path_ignore_case(repository)
+            }
+            None => self.repository_path_ignore_case(repository),
+            Some(storage) => Err(AppError::Git {
+                context: format!("could not inspect ref storage in {}", repository.display()),
+                message: format!("unsupported extensions.refStorage value {storage:?}"),
+            }),
+        }
     }
 
     fn repository_path_ignore_case(&self, repository: &Path) -> Result<bool> {
@@ -706,6 +729,26 @@ fn porcelain_ignored_path(record: &[u8]) -> Option<&[u8]> {
         .map(|path| path.strip_suffix(b"/").unwrap_or(path))
 }
 
+pub fn branch_names_equal(left: &str, right: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+pub fn branch_names_conflict(left: &str, right: &str, ignore_case: bool) -> bool {
+    let mut left = left.split('/');
+    let mut right = right.split('/');
+    loop {
+        match (left.next(), right.next()) {
+            (Some(left), Some(right)) if branch_names_equal(left, right, ignore_case) => {}
+            (Some(_), Some(_)) => return false,
+            _ => return true,
+        }
+    }
+}
+
 fn repository_paths_overlap(left: &[u8], right: &[u8], ignore_case: bool) -> bool {
     path_is_same_or_descendant(left, right, ignore_case)
         || path_is_same_or_descendant(right, left, ignore_case)
@@ -751,6 +794,40 @@ mod tests {
         assert_eq!(worktrees[0].branch.as_deref(), Some("refs/heads/main"));
         assert_eq!(worktrees[1].path, Path::new("/project/space path"));
         assert!(worktrees[1].detached);
+    }
+
+    #[test]
+    fn reftable_ref_names_remain_case_sensitive() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = Command::new("git")
+            .arg("init")
+            .arg("--ref-format=reftable")
+            .arg(temp.path())
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(error.contains("unknown option"), "{error}");
+            return;
+        }
+        let git = Git;
+        let configured = git
+            .run(temp.path(), ["config", "core.ignoreCase", "true"])
+            .unwrap();
+        assert!(configured.status.success());
+
+        assert!(!git.ref_names_ignore_case(temp.path()).unwrap());
+    }
+
+    #[test]
+    fn detects_branch_name_conflicts() {
+        assert!(branch_names_conflict("topic", "topic", false));
+        assert!(branch_names_conflict("topic", "topic/child", false));
+        assert!(branch_names_conflict("topic/child", "topic", false));
+        assert!(!branch_names_conflict("Topic", "topic/child", false));
+        assert!(branch_names_conflict("Topic", "topic/child", true));
+        assert!(!branch_names_conflict("topic/one", "topic/two", true));
+        assert!(!branch_names_conflict("topic", "topic-old", true));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crossterm::{execute, queue};
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use crate::config::{self, Config};
+use crate::config::{self, CheckoutId, Config};
 use crate::error::{AppError, Result};
 use crate::git::Git;
 use crate::workspace::{self, WorkspaceState};
@@ -25,7 +25,7 @@ pub enum Action {
     },
     Create {
         workspace: String,
-        repositories: Vec<String>,
+        checkouts: Vec<CheckoutId>,
     },
 }
 
@@ -172,7 +172,7 @@ fn prompt_for_workspace(
 
     Ok(Outcome::Action(Action::Create {
         workspace,
-        repositories,
+        checkouts: repositories.into_iter().map(CheckoutId::primary).collect(),
     }))
 }
 
@@ -181,7 +181,7 @@ fn workspace_choice(state: &WorkspaceState, name_width: usize) -> WorkspaceChoic
         .members
         .iter()
         .filter(|member| member.exists && member.registered)
-        .map(|member| member.name.as_str())
+        .map(|member| member.id.to_string())
         .collect::<Vec<_>>();
     let summary = if repositories.is_empty() {
         "workspace root only".to_owned()
@@ -202,7 +202,7 @@ fn workspace_choice(state: &WorkspaceState, name_width: usize) -> WorkspaceChoic
             member
                 .inconsistencies
                 .first()
-                .map(|issue| format!("{}: {issue}", member.name))
+                .map(|issue| format!("{}: {issue}", member.id))
         })
     };
 

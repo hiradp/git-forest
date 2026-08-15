@@ -66,7 +66,7 @@ members = [
 
 [workspaces]
 root = "src/.workspaces"
-branch = "user/{workspace}"
+branch = "user/{checkout}"
 ```
 
 All paths are relative to the directory containing `.forest.toml`.
@@ -79,11 +79,15 @@ directory containing `.forest.toml`.
 The only supported placeholders are:
 
 - `{name}` in `repositories.remote`;
-- `{workspace}` in `workspaces.branch`.
+- `{workspace}` and `{checkout}` in `workspaces.branch`.
 
-When present, the remote template must contain `{name}`; the branch template
-must contain `{workspace}`. Unknown placeholders, duplicate members, absolute
-roots, and unsupported configuration versions are rejected.
+`{workspace}` is always the workspace name. `{checkout}` is the explicit slot
+for a named checkout and the workspace name for a primary checkout. Thus the
+template `user/{checkout}` renders `user/stacked` for `api` in workspace
+`stacked` and `user/part-2` for `api@part-2`. A branch template must contain at
+least one supported placeholder. When present, the remote template must contain
+`{name}`. Unknown placeholders, duplicate members, absolute roots, and
+unsupported configuration versions are rejected.
 
 Configuration precedence is:
 
@@ -92,8 +96,12 @@ Configuration precedence is:
 3. `.forest.toml` found by walking from the current directory to the filesystem
    root.
 
-Workspace names must match `[A-Za-z0-9][A-Za-z0-9._-]*`. `.` and `..` are not
-valid names.
+Workspace names and checkout slots must match
+`[A-Za-z0-9][A-Za-z0-9._-]*`. `.` and `..` are not valid names. A checkout is
+selected as `repository` for its primary worktree or `repository@slot` for an
+additional worktree from the same canonical repository. A single request may
+not contain checkout identifiers that differ only by ASCII case because they
+alias on case-insensitive filesystems.
 
 ## Commands
 
@@ -104,13 +112,13 @@ git forest setup [--json]
 git forest repos [--json]
 git forest fetch [<repository>...] [--jobs <N>] [--json]
 git forest update [<repository>...] [--jobs <N>] [--json]
-git forest create <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
-git forest add <workspace> <repository>... [--base <repository>=<ref>]... [--branch <repository>=<branch>]... [--json]
+git forest create <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
+git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest list [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
-git forest remove <workspace> [<repository>...] [--json]
+git forest remove <workspace> [<checkout>...] [--json]
 ```
 
 Global options:
@@ -141,9 +149,11 @@ enter to attach the selected workspace in Herdr.
 The first picker also offers **Create a new workspace**. Forest prompts for a
 valid name and presents the configured repositories as a searchable
 multi-select. After a successful preflight it creates the linked worktrees and
-attaches the new workspace. The launcher uses the configured branch template
-and each repository's local `origin/HEAD`; use the non-interactive `create`
-command when branch or base overrides are needed.
+attaches the new workspace. The launcher creates one primary checkout per
+selected repository using the configured branch template and each repository's
+local `origin/HEAD`; use the
+non-interactive `create` and `add` commands for named checkouts or branch and
+base overrides.
 
 Press escape at any prompt to leave without making changes. The launcher honors
 `NO_COLOR`. Without an interactive terminal, invoking Forest without a
@@ -218,7 +228,7 @@ git forest update
 `create` permits the workspace directory to be absent. `add` requires an
 existing workspace. Both use the same idempotent creation engine.
 
-Before mutation, every requested repository is checked for:
+Before mutation, every requested checkout is checked for:
 
 - a present canonical Git worktree;
 - a valid rendered branch name;
@@ -233,28 +243,44 @@ branch all match. An existing branch that is not checked out elsewhere is added
 without being recreated. New branches use `origin/HEAD` unless `--base` is
 provided.
 
-Use `--branch <repository>=<branch>` to select a branch independently of the
-workspace name. Forest first uses an existing local branch. If it is absent,
-Forest creates a local branch from `refs/remotes/origin/<branch>` and configures
-the remote branch as its upstream. The remote-tracking ref must already exist
-locally; creation never fetches. For example, to review a branch after fetching:
+A primary checkout uses the repository name and retains the existing layout,
+such as `stacked/api`. A named checkout uses `repository@slot`, such as
+`stacked/api@part-2`. Its default branch is rendered with the slot as
+`{checkout}`, allowing multiple branches from one repository in a workspace:
+
+```sh
+git forest create stacked api operator operator@part-2
+```
+
+With `branch = "user/{checkout}"`, this creates `user/stacked` at `api` and
+`operator`, plus `user/part-2` at `operator@part-2`. Checkout identifiers must
+be unique within a request. Two checkouts from the same repository may not
+select the same branch because Git permits a branch to be checked out only
+once.
+
+Use `--branch <checkout>=<branch>` to select a branch independently of the
+configured template. Forest first uses an existing local branch. If it is
+absent, Forest creates a local branch from `refs/remotes/origin/<branch>` and
+configures the remote branch as its upstream. The remote-tracking ref must
+already exist locally; creation never fetches. For example, to review a branch
+after fetching:
 
 ```sh
 git forest fetch api
-git forest create review-123 api --branch api=contributor/fix
+git forest create review-123 api@fix --branch api@fix=contributor/fix
 ```
 
-Repositories without a branch override continue to use the configured branch
+Checkouts without a branch override continue to use the configured branch
 template. A branch override and a base override cannot both target the same
-repository. After later fetches, Forest reports whether a tracking branch is
+checkout. After later fetches, Forest reports whether a tracking branch is
 behind but never merges, resets, or otherwise updates it implicitly.
 
-Preflight conflicts prevent all mutation. If Git fails after earlier
-repositories have been created, successful worktrees are preserved and later
-repositories are marked as not run. Repeating the command resumes safely.
+Preflight conflicts prevent all mutation. If Git fails after earlier checkouts
+have been created, successful worktrees are preserved and later checkouts are
+marked as not run. Repeating the command resumes safely.
 
 Human output keeps shared workspace details in one header and summarizes each
-repository on a compact result line:
+checkout on a compact result line:
 
 ```text
 Workspace  logical-slots
@@ -271,8 +297,9 @@ Colors are enabled only when stdout is a terminal and can be disabled with
 ### `list` and `status`
 
 `list` reconciles workspace directories with every canonical repository's Git
-worktree metadata. It reports unregistered paths, missing registered paths,
-unexpected entries, and layout mismatches.
+worktree metadata. Primary and named checkouts are reported separately. It
+reports unregistered paths, missing registered paths, unexpected entries, and
+layout mismatches.
 
 `status` additionally reports:
 
@@ -304,8 +331,9 @@ The layout is intentionally fixed. It contains one shell pane per tab and does
 not start commands:
 
 - on initial attachment, `1-main` starts in the Forest workspace root;
-- each present, registered repository gets a tab rooted in its worktree;
-- repository tabs are initially created in configuration order;
+- each present, registered checkout gets a tab rooted in its worktree;
+- checkout tabs are initially created in repository configuration order, with
+  the primary checkout before named slots;
 - each managed tab's numeric prefix matches its current Herdr tab position,
   such as `2-api` and `3-operator`.
 
@@ -346,8 +374,10 @@ Removal is deliberately conservative:
 - the workspace directory is removed only when it is empty;
 - unexpected files are reported and preserved.
 
-Removing only named repositories leaves other members in place. Repeating a
-partially completed removal is safe.
+Removing only named checkout identifiers leaves other worktrees in place.
+`remove stacked api@part-2` removes only that named checkout; `api` continues
+to mean only the primary checkout. Repeating a partially completed removal is
+safe.
 
 ## JSON contract
 
@@ -434,6 +464,8 @@ null when `origin/HEAD` or the fetch result does not identify a default branch.
   "repositories": [
     {
       "name": "api",
+      "checkout": "api",
+      "slot": null,
       "path": "/project/src/.workspaces/logical-slots/api",
       "branch": "user/logical-slots",
       "base_ref": "refs/remotes/origin/main",
@@ -445,11 +477,12 @@ null when `origin/HEAD` or the fetch result does not identify a default branch.
 }
 ```
 
-`action` is `reuse`, `add_existing_branch`, `create_branch`, or `null` for a
-conflict discovered before an action could be selected. A branch created to
-track an explicit `--branch` uses `create_branch`, with its remote-tracking ref
-in `base_ref`. `status` is `reused`, `created`, `conflict`, `failed`, or
-`not_run`.
+`name` remains the configured repository name. `checkout` is its unique command
+selector and `slot` is null for a primary checkout. `action` is `reuse`,
+`add_existing_branch`, `create_branch`, or `null` for a conflict discovered
+before an action could be selected. A branch created to track an explicit
+`--branch` uses `create_branch`, with its remote-tracking ref in `base_ref`.
+`status` is `reused`, `created`, `conflict`, `failed`, or `not_run`.
 
 ### List
 
@@ -463,6 +496,8 @@ in `base_ref`. `status` is `reused`, `created`, `conflict`, `failed`, or
       "repositories": [
         {
           "name": "api",
+          "checkout": "api",
+          "slot": null,
           "path": "/project/src/.workspaces/logical-slots/api",
           "exists": true,
           "registered": true,
@@ -490,6 +525,8 @@ in `base_ref`. `status` is `reused`, `created`, `conflict`, `failed`, or
       "repositories": [
         {
           "name": "api",
+          "checkout": "api",
+          "slot": null,
           "path": "/project/src/.workspaces/logical-slots/api",
           "exists": true,
           "registered": true,
@@ -555,6 +592,8 @@ Workspace and tab status is one of `created`, `reused`, or `reconciled`.
   "repositories": [
     {
       "name": "api",
+      "checkout": "api",
+      "slot": null,
       "path": "/project/src/.workspaces/logical-slots/api",
       "status": "removed",
       "message": null

@@ -15,7 +15,9 @@ pub fn run(config: &Config, git: &Git) -> Result<WorkspacesListReport> {
                 .members
                 .into_iter()
                 .map(|member| WorkspaceListRepository {
-                    name: member.name,
+                    name: member.id.repository.clone(),
+                    checkout: member.id.to_string(),
+                    slot: member.id.slot,
                     path: member.path,
                     exists: member.exists,
                     registered: member.registered,

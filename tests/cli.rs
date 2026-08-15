@@ -1009,6 +1009,211 @@ fn creates_multiple_worktrees_and_is_idempotent() {
 }
 
 #[test]
+fn manages_multiple_named_checkouts_for_one_repository() {
+    let fixture = WorkspaceFixture::new();
+
+    let created = forest(
+        &fixture.root,
+        &[
+            "create",
+            "stacked",
+            "alpha",
+            "beta",
+            "beta@part-2",
+            "--json",
+        ],
+    );
+    assert_success(&created);
+    let report: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["checkout"], "alpha");
+    assert_eq!(report["repositories"][0]["slot"], Value::Null);
+    assert_eq!(report["repositories"][1]["checkout"], "beta");
+    assert_eq!(report["repositories"][2]["name"], "beta");
+    assert_eq!(report["repositories"][2]["checkout"], "beta@part-2");
+    assert_eq!(report["repositories"][2]["slot"], "part-2");
+    assert_eq!(report["repositories"][2]["branch"], "test/part-2");
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("stacked").join("beta"),
+            &["branch", "--show-current"]
+        ),
+        "test/stacked"
+    );
+    assert_eq!(
+        git_stdout(
+            &fixture.workspace("stacked").join("beta@part-2"),
+            &["branch", "--show-current"]
+        ),
+        "test/part-2"
+    );
+
+    let repeated = forest(
+        &fixture.root,
+        &[
+            "create",
+            "stacked",
+            "alpha",
+            "beta",
+            "beta@part-2",
+            "--json",
+        ],
+    );
+    assert_success(&repeated);
+    let report: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert!(
+        report["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|checkout| checkout["status"] == "reused")
+    );
+
+    let listed = forest(&fixture.root, &["list", "--json"]);
+    assert_success(&listed);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let checkouts = report["workspaces"][0]["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|checkout| checkout["checkout"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(checkouts, ["alpha", "beta", "beta@part-2"]);
+
+    let herdr = FakeHerdr::new(&fixture.root);
+    let attached = herdr
+        .command(&fixture.root)
+        .args(["attach", "stacked", "--json"])
+        .output()
+        .unwrap();
+    assert_success(&attached);
+    let report: Value = serde_json::from_slice(&attached.stdout).unwrap();
+    assert_eq!(report["tabs"][3]["label"], "4-beta@part-2");
+    assert!(herdr.calls().contains(
+        &"pane\treport-metadata\tw-new:p-beta@part-2\t--source\tgit-forest\t--token\tgit_forest_tab=repository:beta@part-2"
+            .to_owned()
+    ));
+
+    let removed = forest(
+        &fixture.root,
+        &["remove", "stacked", "beta@part-2", "--json"],
+    );
+    assert_success(&removed);
+    let report: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["name"], "beta");
+    assert_eq!(report["repositories"][0]["checkout"], "beta@part-2");
+    assert!(!fixture.workspace("stacked").join("beta@part-2").exists());
+    assert!(fixture.workspace("stacked").join("beta").exists());
+}
+
+#[test]
+fn applies_branch_overrides_to_named_checkouts() {
+    let fixture = WorkspaceFixture::new();
+    for branch in ["contributor/part-1", "contributor/part-2"] {
+        git(&fixture.canonical("alpha"), &["branch", branch, "main"]);
+    }
+
+    let output = forest(
+        &fixture.root,
+        &[
+            "create",
+            "stacked",
+            "alpha@part-1",
+            "alpha@part-2",
+            "--branch",
+            "alpha@part-1=contributor/part-1",
+            "--branch",
+            "alpha@part-2=contributor/part-2",
+            "--json",
+        ],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["checkout"], "alpha@part-1");
+    assert_eq!(report["repositories"][0]["branch"], "contributor/part-1");
+    assert_eq!(report["repositories"][1]["checkout"], "alpha@part-2");
+    assert_eq!(report["repositories"][1]["branch"], "contributor/part-2");
+}
+
+#[test]
+fn preflight_rejects_checkouts_that_select_the_same_branch() {
+    let fixture = WorkspaceFixture::new();
+    write_config_with_branch(
+        &fixture.root.join(".forest.toml"),
+        &["alpha", "beta", "gamma"],
+        "test/{workspace}",
+    );
+
+    let output = forest(
+        &fixture.root,
+        &["create", "stacked", "beta", "beta@part-2", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "not_run");
+    assert_eq!(report["repositories"][1]["status"], "conflict");
+    assert!(
+        report["repositories"][1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("select the same branch")
+    );
+    assert!(!fixture.workspace("stacked").exists());
+}
+
+#[test]
+fn rejects_case_folded_checkout_destination_aliases() {
+    let fixture = WorkspaceFixture::new();
+
+    let output = forest(
+        &fixture.root,
+        &["create", "aliases", "alpha@Foo", "alpha@foo", "--json"],
+    );
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["exit_code"], 2);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("same destination")
+    );
+    assert!(!fixture.workspace("aliases").exists());
+}
+
+#[test]
+fn rejects_case_folded_existing_branch_namespace_conflicts() {
+    let fixture = WorkspaceFixture::new();
+    let canonical = fixture.canonical("alpha");
+    git(&canonical, &["branch", "Foo", "main"]);
+    git(&canonical, &["config", "core.ignoreCase", "true"]);
+    write_config_with_branch(
+        &fixture.root.join(".forest.toml"),
+        &["alpha", "beta", "gamma"],
+        "foo/{checkout}",
+    );
+
+    let output = forest(
+        &fixture.root,
+        &["create", "case-refs", "alpha@child", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert!(
+        report["repositories"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("existing branch Foo")
+    );
+    assert!(!fixture.workspace("case-refs").exists());
+}
+
+#[test]
 fn rejects_stale_registration_pointing_at_a_foreign_repository() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
@@ -2114,6 +2319,95 @@ fn refuses_removal_when_only_ignored_files_are_present() {
 }
 
 #[test]
+fn remove_all_removes_primary_and_named_checkouts() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &[
+            "create",
+            "remove-named",
+            "alpha",
+            "alpha@part-2",
+            "beta",
+            "--json",
+        ],
+    ));
+
+    let output = forest(&fixture.root, &["remove", "remove-named", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checkouts = report["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|checkout| checkout["checkout"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(checkouts, ["alpha", "alpha@part-2", "beta"]);
+    assert!(
+        report["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|checkout| checkout["status"] == "removed")
+    );
+    assert_eq!(report["workspace_removed"], true);
+    assert!(!fixture.workspace("remove-named").exists());
+    git(
+        &fixture.canonical("alpha"),
+        &["show-ref", "--verify", "--quiet", "refs/heads/test/part-2"],
+    );
+}
+
+#[test]
+fn dirty_named_checkout_blocks_remove_all() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "dirty-named", "alpha", "alpha@part-2", "--json"],
+    ));
+    let named = fixture.workspace("dirty-named").join("alpha@part-2");
+    fs::write(named.join("untracked.txt"), "dirty\n").unwrap();
+
+    let output = forest(&fixture.root, &["remove", "dirty-named", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["checkout"], "alpha");
+    assert_eq!(report["repositories"][0]["status"], "not_run");
+    assert_eq!(report["repositories"][1]["checkout"], "alpha@part-2");
+    assert_eq!(report["repositories"][1]["status"], "conflict");
+    assert!(fixture.workspace("dirty-named").join("alpha").exists());
+    assert!(named.exists());
+}
+
+#[test]
+fn removes_stale_named_checkout_registration() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "stale-named", "alpha@part-2", "--json"],
+    ));
+    let missing = fixture.workspace("stale-named").join("alpha@part-2");
+    fs::remove_dir_all(&missing).unwrap();
+
+    let output = forest(&fixture.root, &["remove", "stale-named", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["checkout"], "alpha@part-2");
+    assert_eq!(report["repositories"][0]["status"], "removed");
+    assert_eq!(report["workspace_removed"], true);
+    assert!(
+        !git_stdout(
+            &fixture.canonical("alpha"),
+            &["worktree", "list", "--porcelain"]
+        )
+        .contains(path(&missing))
+    );
+}
+
+#[test]
 fn removes_stale_registration_when_a_worktree_is_missing() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
@@ -2400,7 +2694,15 @@ fn write_config(path: &Path, members: &[&str]) {
     write_config_with_remote(path, members, Some("git@example.com:{name}.git"));
 }
 
+fn write_config_with_branch(path: &Path, members: &[&str], branch: &str) {
+    write_config_contents(path, members, Some("git@example.com:{name}.git"), branch);
+}
+
 fn write_config_with_remote(path: &Path, members: &[&str], remote: Option<&str>) {
+    write_config_contents(path, members, remote, "test/{checkout}");
+}
+
+fn write_config_contents(path: &Path, members: &[&str], remote: Option<&str>, branch: &str) {
     let members = members
         .iter()
         .map(|member| format!("  {member:?},"))
@@ -2422,7 +2724,7 @@ root = "src"
 
 [workspaces]
 root = "src/.workspaces"
-branch = "test/{{workspace}}"
+branch = {branch:?}
 "#,
         ),
     )

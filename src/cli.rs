@@ -4,6 +4,8 @@ use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::config::CheckoutId;
+
 #[derive(Debug, Parser)]
 #[command(name = "git-forest", version, about)]
 pub struct Cli {
@@ -114,16 +116,16 @@ pub struct CreateArgs {
     /// Workspace name
     pub workspace: String,
 
-    /// Configured repository names
+    /// Configured repository checkouts in REPOSITORY[@SLOT] form
     #[arg(required = true, num_args = 1..)]
-    pub repositories: Vec<String>,
+    pub checkouts: Vec<CheckoutId>,
 
-    /// Override a repository's creation base
-    #[arg(long = "base", value_name = "REPOSITORY=REF")]
+    /// Override a checkout's creation base
+    #[arg(long = "base", value_name = "CHECKOUT=REF")]
     pub bases: Vec<BaseOverride>,
 
     /// Use a local branch or create it tracking origin
-    #[arg(long = "branch", value_name = "REPOSITORY=BRANCH")]
+    #[arg(long = "branch", value_name = "CHECKOUT=BRANCH")]
     pub branches: Vec<BranchOverride>,
 
     #[command(flatten)]
@@ -132,7 +134,7 @@ pub struct CreateArgs {
 
 #[derive(Debug, Clone)]
 pub struct BaseOverride {
-    pub repository: String,
+    pub checkout: CheckoutId,
     pub reference: String,
 }
 
@@ -140,19 +142,16 @@ impl FromStr for BaseOverride {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (repository, reference) = value
+        let (checkout, reference) = value
             .split_once('=')
-            .ok_or_else(|| "expected REPOSITORY=REF".to_owned())?;
+            .ok_or_else(|| "expected CHECKOUT=REF".to_owned())?;
 
-        if repository.is_empty() {
-            return Err("repository name cannot be empty".to_owned());
-        }
         if reference.is_empty() {
             return Err("base ref cannot be empty".to_owned());
         }
 
         Ok(Self {
-            repository: repository.to_owned(),
+            checkout: checkout.parse()?,
             reference: reference.to_owned(),
         })
     }
@@ -160,7 +159,7 @@ impl FromStr for BaseOverride {
 
 #[derive(Debug, Clone)]
 pub struct BranchOverride {
-    pub repository: String,
+    pub checkout: CheckoutId,
     pub branch: String,
 }
 
@@ -168,19 +167,16 @@ impl FromStr for BranchOverride {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (repository, branch) = value
+        let (checkout, branch) = value
             .split_once('=')
-            .ok_or_else(|| "expected REPOSITORY=BRANCH".to_owned())?;
+            .ok_or_else(|| "expected CHECKOUT=BRANCH".to_owned())?;
 
-        if repository.is_empty() {
-            return Err("repository name cannot be empty".to_owned());
-        }
         if branch.is_empty() {
             return Err("branch name cannot be empty".to_owned());
         }
 
         Ok(Self {
-            repository: repository.to_owned(),
+            checkout: checkout.parse()?,
             branch: branch.to_owned(),
         })
     }
@@ -216,8 +212,8 @@ pub struct AttachArgs {
 pub struct RemoveArgs {
     pub workspace: String,
 
-    /// Remove only these configured repositories
-    pub repositories: Vec<String>,
+    /// Remove only these repository checkouts
+    pub checkouts: Vec<CheckoutId>,
 
     #[command(flatten)]
     pub output: OutputArgs,

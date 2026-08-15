@@ -407,7 +407,7 @@ fn render_workspace_change(
     let name_width = report
         .repositories
         .iter()
-        .map(|repository| repository.name.chars().count())
+        .map(|repository| repository.checkout.chars().count())
         .max()
         .unwrap_or(0);
     let status_width = report
@@ -425,7 +425,7 @@ fn render_workspace_change(
             "  {color}{symbol}{} {}{:name_width$}{}  {color}{status}{}",
             styles.reset(),
             styles.bold(),
-            repository.name,
+            repository.checkout,
             styles.reset(),
             styles.reset(),
         )
@@ -480,7 +480,7 @@ fn render_workspace_list(
     let name_width = workspace
         .repositories
         .iter()
-        .map(|repository| repository.name.chars().count())
+        .map(|repository| repository.checkout.chars().count())
         .max()
         .unwrap_or(0);
 
@@ -497,7 +497,7 @@ fn render_workspace_list(
             "  {color}{symbol}{} {}{:name_width$}{}  {}",
             styles.reset(),
             styles.bold(),
-            repository.name,
+            repository.checkout,
             styles.reset(),
             repository.branch.as_deref().unwrap_or("detached"),
         )
@@ -561,7 +561,7 @@ fn render_workspace_status(
     let name_width = workspace
         .repositories
         .iter()
-        .map(|repository| repository.name.chars().count())
+        .map(|repository| repository.checkout.chars().count())
         .max()
         .unwrap_or(0);
 
@@ -581,7 +581,7 @@ fn render_workspace_status(
             "  {symbol_color}{symbol}{} {}{:name_width$}{}  {}",
             styles.reset(),
             styles.bold(),
-            repository.name,
+            repository.checkout,
             styles.reset(),
             repository.branch.as_deref().unwrap_or("detached"),
         )
@@ -726,7 +726,7 @@ fn render_workspace_removal(
     let name_width = report
         .repositories
         .iter()
-        .map(|repository| repository.name.chars().count())
+        .map(|repository| repository.checkout.chars().count())
         .max()
         .unwrap_or(0);
     for repository in &report.repositories {
@@ -737,7 +737,7 @@ fn render_workspace_removal(
             "  {color}{symbol}{} {}{:name_width$}{}  {color}{status}{}",
             styles.reset(),
             styles.bold(),
-            repository.name,
+            repository.checkout,
             styles.reset(),
             styles.reset(),
         )
@@ -990,6 +990,8 @@ mod tests {
             repositories: vec![
                 RepositoryChangeReport {
                     name: "alpha".to_owned(),
+                    checkout: "alpha".to_owned(),
+                    slot: None,
                     path: PathBuf::from("/workspaces/topic/alpha"),
                     branch: "user/topic".to_owned(),
                     base_ref: Some("origin/main".to_owned()),
@@ -999,6 +1001,8 @@ mod tests {
                 },
                 RepositoryChangeReport {
                     name: "beta".to_owned(),
+                    checkout: "beta".to_owned(),
+                    slot: None,
                     path: PathBuf::from("/workspaces/topic/beta"),
                     branch: "user/topic".to_owned(),
                     base_ref: None,

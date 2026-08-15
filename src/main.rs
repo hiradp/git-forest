@@ -92,12 +92,12 @@ fn run_launcher(config: &Config) -> Result<u8> {
         }
         launcher::Outcome::Action(launcher::Action::Create {
             workspace,
-            repositories,
+            checkouts,
         }) => {
             let created = execute(
                 &Command::Create(CreateArgs {
                     workspace: workspace.clone(),
-                    repositories,
+                    checkouts,
                     bases: Vec::new(),
                     branches: Vec::new(),
                     output: OutputArgs { json: false },
