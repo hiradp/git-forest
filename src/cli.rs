@@ -47,11 +47,11 @@ pub enum Command {
     /// Fetch and fast-forward canonical default branches
     Update(UpdateArgs),
 
-    /// Create a workspace and its linked worktrees
+    /// Create a workspace, optionally with linked worktrees
     Create(CreateArgs),
 
     /// Add linked worktrees to an existing workspace
-    Add(CreateArgs),
+    Add(AddArgs),
 
     /// List workspaces
     List(OutputArgs),
@@ -79,7 +79,8 @@ impl Command {
             Self::Setup(args) | Self::Repos(args) | Self::List(args) => args.json,
             Self::Fetch(args) => args.output.json,
             Self::Update(args) => args.output.json,
-            Self::Create(args) | Self::Add(args) => args.output.json,
+            Self::Create(args) => args.output.json,
+            Self::Add(args) => args.output.json,
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
             Self::Attach(args) => args.output.json,
@@ -143,6 +144,28 @@ pub struct UpdateArgs {
 
 #[derive(Debug, Args)]
 pub struct CreateArgs {
+    /// Workspace name
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
+    pub workspace: String,
+
+    /// Configured repository checkouts in REPOSITORY[@SLOT] form; omit for an empty workspace
+    #[arg(add = ArgValueCompleter::new(completion::checkouts))]
+    pub checkouts: Vec<CheckoutId>,
+
+    /// Override a checkout's creation base
+    #[arg(long = "base", value_name = "CHECKOUT=REF")]
+    pub bases: Vec<BaseOverride>,
+
+    /// Use a local branch or create it tracking origin
+    #[arg(long = "branch", value_name = "CHECKOUT=BRANCH")]
+    pub branches: Vec<BranchOverride>,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
     /// Workspace name
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,

@@ -972,6 +972,44 @@ fn rejects_branch_namespace_conflicts_during_preflight() {
 }
 
 #[test]
+fn creates_an_empty_workspace_and_adds_a_worktree_later() {
+    let fixture = WorkspaceFixture::new();
+    let workspace = fixture.workspace("scratch");
+
+    let created = forest(&fixture.root, &["create", "scratch", "--json"]);
+
+    assert_success(&created);
+    let report: Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(report["workspace"], "scratch");
+    assert_eq!(report["path"], path(&workspace));
+    assert_eq!(report["repositories"].as_array().unwrap().len(), 0);
+    assert!(workspace.is_dir());
+    assert_eq!(fs::read_dir(&workspace).unwrap().count(), 0);
+
+    let notes = workspace.join("notes.txt");
+    fs::write(&notes, "scratch notes\n").unwrap();
+    let repeated = forest(&fixture.root, &["create", "scratch", "--json"]);
+    assert_success(&repeated);
+    assert_eq!(fs::read_to_string(&notes).unwrap(), "scratch notes\n");
+
+    let added = forest(&fixture.root, &["add", "scratch", "alpha", "--json"]);
+
+    assert_success(&added);
+    let report: Value = serde_json::from_slice(&added.stdout).unwrap();
+    assert_eq!(report["repositories"][0]["status"], "created");
+    assert!(workspace.join("alpha").is_dir());
+    assert_eq!(fs::read_to_string(notes).unwrap(), "scratch notes\n");
+
+    let no_op = forest(&fixture.root, &["create", "scratch"]);
+    assert_success(&no_op);
+    assert!(
+        String::from_utf8(no_op.stdout)
+            .unwrap()
+            .contains("No checkouts requested.")
+    );
+}
+
+#[test]
 fn creates_multiple_worktrees_and_is_idempotent() {
     let fixture = WorkspaceFixture::new();
 
@@ -2525,7 +2563,7 @@ fn rejects_a_conflicting_destination_path() {
 #[test]
 fn emits_json_for_usage_errors_when_requested() {
     let output = Command::new(binary())
-        .args(["create", "missing-repositories", "--json"])
+        .args(["add", "missing-repositories", "--json"])
         .output()
         .unwrap();
 

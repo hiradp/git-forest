@@ -84,8 +84,11 @@ Use
 .BI \-\-jobs " N"
 to limit concurrent fetches.
 .TP
-.BI create " workspace checkout ..."
-Create a workspace and linked worktrees.
+.BI create " workspace [checkout ...]"
+Create a workspace, optionally with linked worktrees.
+When no checkouts are provided, create an empty workspace directory so
+worktrees can be added later with
+.BR add .
 A checkout is
 .B repository
 for its primary worktree or

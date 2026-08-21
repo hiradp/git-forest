@@ -27,8 +27,8 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
             .map(CommandOutcome::success),
         Command::Fetch(arguments) => fetch::run(config, git, arguments),
         Command::Update(arguments) => update::run(config, git, arguments),
-        Command::Create(arguments) => create::run(config, git, arguments, false),
-        Command::Add(arguments) => create::run(config, git, arguments, true),
+        Command::Create(arguments) => create::run_create(config, git, arguments),
+        Command::Add(arguments) => create::run_add(config, git, arguments),
         Command::List(_) => list::run(config, git)
             .map(CommandReport::WorkspacesList)
             .map(CommandOutcome::success),

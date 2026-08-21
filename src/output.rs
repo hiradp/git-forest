@@ -404,6 +404,16 @@ fn render_workspace_change(
         styles,
     )?;
 
+    if report.repositories.is_empty() {
+        writeln!(
+            writer,
+            "  {}No checkouts requested.{}",
+            styles.dim(),
+            styles.reset()
+        )
+        .map_err(AppError::WriteOutput)?;
+    }
+
     let name_width = report
         .repositories
         .iter()

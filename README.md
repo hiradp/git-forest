@@ -149,7 +149,7 @@ git forest setup [--json]
 git forest repos [--json]
 git forest fetch [<repository>...] [--jobs <N>] [--json]
 git forest update [<repository>...] [--jobs <N>] [--json]
-git forest create <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
+git forest create <workspace> [<checkout>...] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest list [--json]
 git forest status [<workspace>] [--json]
@@ -263,8 +263,16 @@ git forest update
 
 ### `create` and `add`
 
-`create` permits the workspace directory to be absent. `add` requires an
-existing workspace. Both use the same idempotent creation engine.
+`create` permits the workspace directory to be absent. When no checkouts are
+provided, it creates an empty workspace directory; repositories can be added
+later with `add`. Repeating empty creation is safe. `add` requires an existing
+workspace and at least one checkout. Both use the same idempotent creation
+engine.
+
+```sh
+git forest create scratch
+git forest add scratch api
+```
 
 Before mutation, every requested checkout is checked for:
 

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cli::CreateArgs;
+use crate::cli::{AddArgs, BaseOverride, BranchOverride, CreateArgs};
 use crate::config::{CheckoutId, Config, RepositoryConfig};
 use crate::domain::{
     ChangeAction, ChangeStatus, CommandOutcome, CommandReport, RepositoryChangeReport,
@@ -10,6 +10,36 @@ use crate::domain::{
 };
 use crate::error::{AppError, Result};
 use crate::git::{Git, branch_names_conflict, branch_names_equal, failure_message};
+
+#[derive(Debug, Clone, Copy)]
+struct Arguments<'a> {
+    workspace: &'a str,
+    checkouts: &'a [CheckoutId],
+    bases: &'a [BaseOverride],
+    branches: &'a [BranchOverride],
+}
+
+impl<'a> From<&'a CreateArgs> for Arguments<'a> {
+    fn from(arguments: &'a CreateArgs) -> Self {
+        Self {
+            workspace: &arguments.workspace,
+            checkouts: &arguments.checkouts,
+            bases: &arguments.bases,
+            branches: &arguments.branches,
+        }
+    }
+}
+
+impl<'a> From<&'a AddArgs> for Arguments<'a> {
+    fn from(arguments: &'a AddArgs) -> Self {
+        Self {
+            workspace: &arguments.workspace,
+            checkouts: &arguments.checkouts,
+            bases: &arguments.bases,
+            branches: &arguments.branches,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Plan {
@@ -59,13 +89,21 @@ enum Preflight {
     Conflict(Identity, String),
 }
 
-pub fn run(
+pub fn run_create(config: &Config, git: &Git, arguments: &CreateArgs) -> Result<CommandOutcome> {
+    run(config, git, arguments.into(), false)
+}
+
+pub fn run_add(config: &Config, git: &Git, arguments: &AddArgs) -> Result<CommandOutcome> {
+    run(config, git, arguments.into(), true)
+}
+
+fn run(
     config: &Config,
     git: &Git,
-    arguments: &CreateArgs,
+    arguments: Arguments<'_>,
     require_existing_workspace: bool,
 ) -> Result<CommandOutcome> {
-    let workspace_path = config.workspace_path(&arguments.workspace)?;
+    let workspace_path = config.workspace_path(arguments.workspace)?;
     let overrides = validate_arguments(config, arguments)?;
 
     if workspace_path.exists() && !workspace_path.is_dir() {
@@ -82,7 +120,7 @@ pub fn run(
     }
 
     let mut preflight = Vec::with_capacity(arguments.checkouts.len());
-    for checkout in &arguments.checkouts {
+    for checkout in arguments.checkouts {
         let repository = config
             .repository(&checkout.repository)
             .expect("requested repositories were validated");
@@ -90,7 +128,7 @@ pub fn run(
         let branch_override = overrides.branches.get(checkout);
         let branch = match branch_override {
             Some(branch) => branch.clone(),
-            None => config.branch_for_checkout(&arguments.workspace, checkout)?,
+            None => config.branch_for_checkout(arguments.workspace, checkout)?,
         };
         let identity = Identity {
             checkout: checkout.clone(),
@@ -137,7 +175,7 @@ pub fn run(
             .collect();
         return Ok(CommandOutcome {
             report: CommandReport::WorkspaceChange(WorkspaceChangeReport {
-                workspace: arguments.workspace.clone(),
+                workspace: arguments.workspace.to_owned(),
                 path: workspace_path,
                 repositories,
             }),
@@ -152,9 +190,10 @@ pub fn run(
             Preflight::Conflict(_, _) => unreachable!("conflicts were handled above"),
         })
         .collect::<Vec<_>>();
-    if plans
-        .iter()
-        .any(|plan| !matches!(plan.action, PlannedAction::Reuse))
+    if !workspace_path.is_dir()
+        || plans
+            .iter()
+            .any(|plan| !matches!(plan.action, PlannedAction::Reuse))
     {
         fs::create_dir_all(&workspace_path).map_err(|source| AppError::Filesystem {
             context: format!(
@@ -232,7 +271,7 @@ pub fn run(
 
     Ok(CommandOutcome {
         report: CommandReport::WorkspaceChange(WorkspaceChangeReport {
-            workspace: arguments.workspace.clone(),
+            workspace: arguments.workspace.to_owned(),
             path: workspace_path,
             repositories,
         }),
@@ -295,10 +334,10 @@ fn apply_planned_branch_conflicts(preflight: &mut [Preflight]) {
     }
 }
 
-fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<Overrides> {
+fn validate_arguments(config: &Config, arguments: Arguments<'_>) -> Result<Overrides> {
     let mut requested = HashSet::new();
     let mut destinations = HashMap::new();
-    for checkout in &arguments.checkouts {
+    for checkout in arguments.checkouts {
         if !requested.insert(checkout.clone()) {
             return Err(AppError::InvalidInput(format!(
                 "checkout {:?} was requested more than once",
@@ -321,7 +360,7 @@ fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<Overrid
     }
 
     let mut branches = HashMap::new();
-    for branch in &arguments.branches {
+    for branch in arguments.branches {
         if !requested.contains(&branch.checkout) {
             return Err(AppError::InvalidInput(format!(
                 "branch override provided for unrequested checkout {:?}",
@@ -340,7 +379,7 @@ fn validate_arguments(config: &Config, arguments: &CreateArgs) -> Result<Overrid
     }
 
     let mut bases = HashMap::new();
-    for base in &arguments.bases {
+    for base in arguments.bases {
         if !requested.contains(&base.checkout) {
             return Err(AppError::InvalidInput(format!(
                 "base override provided for unrequested checkout {:?}",
