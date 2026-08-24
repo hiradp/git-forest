@@ -3,10 +3,11 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::domain::{
-    AttachStatus, ChangeAction, ChangeStatus, CommandReport, FetchStatus, RemovalStatus,
-    RepositoriesFetchReport, RepositoriesReport, RepositoriesSetupReport, RepositoriesUpdateReport,
-    SetupStatus, UpdateStatus, WorkspaceAttachReport, WorkspaceChangeReport, WorkspaceListEntry,
-    WorkspaceRemovalReport, WorkspaceStatusEntry,
+    ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CommandReport, FetchStatus,
+    RemovalStatus, RepositoriesFetchReport, RepositoriesReport, RepositoriesSetupReport,
+    RepositoriesUpdateReport, RepositoryRemoval, SetupStatus, UpdateStatus, WorkspaceArchiveReport,
+    WorkspaceAttachReport, WorkspaceChangeReport, WorkspaceListEntry, WorkspaceRemovalReport,
+    WorkspaceStatusEntry,
 };
 use crate::error::{AppError, Result};
 
@@ -111,6 +112,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacePath(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
+            CommandReport::WorkspaceArchive(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRemoval(report) => render_json(&mut writer, report)?,
         }
         writeln!(writer).map_err(AppError::WriteOutput)?;
@@ -172,6 +174,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         }
         CommandReport::WorkspaceAttach(report) => {
             render_workspace_attach(&mut writer, report, styles)
+        }
+        CommandReport::WorkspaceArchive(report) => {
+            render_workspace_archive(&mut writer, report, styles)
         }
         CommandReport::WorkspaceRemoval(report) => {
             render_workspace_removal(&mut writer, report, styles)
@@ -746,6 +751,45 @@ fn render_workspace_attach(
     Ok(())
 }
 
+fn render_workspace_archive(
+    writer: &mut impl Write,
+    report: &WorkspaceArchiveReport,
+    styles: Styles,
+) -> Result<()> {
+    render_header_field(
+        writer,
+        "Workspace",
+        &report.workspace,
+        styles.bold(),
+        styles,
+    )?;
+    render_header_field(writer, "Path", report.path.display(), "", styles)?;
+    render_header_field(writer, "Archive", report.archive_path.display(), "", styles)?;
+    writeln!(writer).map_err(AppError::WriteOutput)?;
+
+    render_repository_removals(writer, &report.repositories, styles)?;
+
+    let (symbol, color, summary) = match report.status {
+        ArchiveStatus::Archived => ("✓", styles.green(), "Workspace archived."),
+        ArchiveStatus::AlreadyArchived => ("✓", styles.green(), "Workspace is already archived."),
+        ArchiveStatus::Conflict => ("✗", styles.red(), "Workspace was not archived."),
+        ArchiveStatus::Failed => ("✗", styles.red(), "Workspace archival failed."),
+    };
+    writeln!(writer, "\n  {color}{symbol}{} {summary}", styles.reset())
+        .map_err(AppError::WriteOutput)?;
+    if let Some(message) = &report.message {
+        render_message(writer, message, styles)?;
+    }
+    if !report.preserved_entries.is_empty() {
+        writeln!(writer, "\n{}Preserved{}", styles.bold(), styles.reset())
+            .map_err(AppError::WriteOutput)?;
+        for entry in &report.preserved_entries {
+            writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
+        }
+    }
+    Ok(())
+}
+
 fn render_workspace_removal(
     writer: &mut impl Write,
     report: &WorkspaceRemovalReport,
@@ -759,29 +803,7 @@ fn render_workspace_removal(
         styles,
     )?;
 
-    let name_width = report
-        .repositories
-        .iter()
-        .map(|repository| repository.checkout.chars().count())
-        .max()
-        .unwrap_or(0);
-    for repository in &report.repositories {
-        let status = removal_status_name(repository.status);
-        let (symbol, color) = removal_status_style(repository.status, styles);
-        writeln!(
-            writer,
-            "  {color}{symbol}{} {}{:name_width$}{}  {color}{status}{}",
-            styles.reset(),
-            styles.bold(),
-            repository.checkout,
-            styles.reset(),
-            styles.reset(),
-        )
-        .map_err(AppError::WriteOutput)?;
-        if let Some(message) = &repository.message {
-            render_message(writer, message, styles)?;
-        }
-    }
+    render_repository_removals(writer, &report.repositories, styles)?;
 
     if report.workspace_removed {
         writeln!(
@@ -805,6 +827,36 @@ fn render_workspace_removal(
             styles.reset()
         )
         .map_err(AppError::WriteOutput)?;
+    }
+    Ok(())
+}
+
+fn render_repository_removals(
+    writer: &mut impl Write,
+    repositories: &[RepositoryRemoval],
+    styles: Styles,
+) -> Result<()> {
+    let name_width = repositories
+        .iter()
+        .map(|repository| repository.checkout.chars().count())
+        .max()
+        .unwrap_or(0);
+    for repository in repositories {
+        let status = removal_status_name(repository.status);
+        let (symbol, color) = removal_status_style(repository.status, styles);
+        writeln!(
+            writer,
+            "  {color}{symbol}{} {}{:name_width$}{}  {color}{status}{}",
+            styles.reset(),
+            styles.bold(),
+            repository.checkout,
+            styles.reset(),
+            styles.reset(),
+        )
+        .map_err(AppError::WriteOutput)?;
+        if let Some(message) = &repository.message {
+            render_message(writer, message, styles)?;
+        }
     }
     Ok(())
 }

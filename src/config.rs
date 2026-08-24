@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::error::{AppError, Result};
 
 const CONFIG_FILE: &str = ".forest.toml";
+pub const ARCHIVE_DIRECTORY: &str = ".archive";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -202,6 +203,15 @@ impl Config {
     pub fn workspace_path(&self, workspace: &str) -> Result<PathBuf> {
         validate_workspace_name(workspace)?;
         Ok(self.workspaces_root.join(workspace))
+    }
+
+    pub fn archive_root(&self) -> PathBuf {
+        self.workspaces_root.join(ARCHIVE_DIRECTORY)
+    }
+
+    pub fn archive_path(&self, workspace: &str) -> Result<PathBuf> {
+        validate_workspace_name(workspace)?;
+        Ok(self.archive_root().join(workspace))
     }
 }
 

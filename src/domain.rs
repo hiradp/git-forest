@@ -217,6 +217,26 @@ pub enum AttachStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WorkspaceArchiveReport {
+    pub workspace: String,
+    pub path: PathBuf,
+    pub archive_path: PathBuf,
+    pub repositories: Vec<RepositoryRemoval>,
+    pub status: ArchiveStatus,
+    pub preserved_entries: Vec<PathBuf>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveStatus {
+    Archived,
+    AlreadyArchived,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorkspaceRemovalReport {
     pub workspace: String,
     pub path: PathBuf,
@@ -235,7 +255,7 @@ pub struct RepositoryRemoval {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalStatus {
     Removed,
@@ -271,5 +291,6 @@ pub enum CommandReport {
     WorkspacesStatus(WorkspacesStatusReport),
     WorkspacePath(WorkspacePathReport),
     WorkspaceAttach(WorkspaceAttachReport),
+    WorkspaceArchive(WorkspaceArchiveReport),
     WorkspaceRemoval(WorkspaceRemovalReport),
 }

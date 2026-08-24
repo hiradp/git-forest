@@ -90,11 +90,24 @@ enum Preflight {
 }
 
 pub fn run_create(config: &Config, git: &Git, arguments: &CreateArgs) -> Result<CommandOutcome> {
+    let _lock = crate::workspace::lock_mutations(config)?;
     run(config, git, arguments.into(), false)
 }
 
 pub fn run_add(config: &Config, git: &Git, arguments: &AddArgs) -> Result<CommandOutcome> {
+    let _lock = crate::workspace::lock_mutations(config)?;
     run(config, git, arguments.into(), true)
+}
+
+fn path_occupied(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(AppError::Filesystem {
+            context: format!("could not inspect archive path {}", path.display()),
+            source,
+        }),
+    }
 }
 
 fn run(
@@ -104,8 +117,16 @@ fn run(
     require_existing_workspace: bool,
 ) -> Result<CommandOutcome> {
     let workspace_path = config.workspace_path(arguments.workspace)?;
+    let archive_path = config.archive_path(arguments.workspace)?;
     let overrides = validate_arguments(config, arguments)?;
 
+    if path_occupied(&archive_path)? {
+        return Err(AppError::Operational(format!(
+            "workspace {:?} is archived at {}; move the archive before reusing its name",
+            arguments.workspace,
+            archive_path.display()
+        )));
+    }
     if workspace_path.exists() && !workspace_path.is_dir() {
         return Err(AppError::Operational(format!(
             "workspace path {} exists and is not a directory",
@@ -466,7 +487,7 @@ fn preflight_repository(
         .iter()
         .find(|worktree| paths_match(&worktree.path, &identity.destination));
 
-    if identity.destination.exists() {
+    if path_occupied(&identity.destination)? {
         let Some(worktree) = destination_worktree else {
             return Ok(conflict(format!(
                 "destination {} exists but is not registered with canonical repository {}",

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{CheckoutId, Config, RepositoryConfig};
@@ -28,6 +30,45 @@ pub struct MemberState {
     pub inconsistencies: Vec<String>,
 }
 
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+pub struct MutationLock {
+    _config_directory: File,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux", target_vendor = "apple")))]
+pub struct MutationLock;
+
+#[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
+pub fn lock_mutations(config: &Config) -> Result<Option<MutationLock>> {
+    use rustix::fs::{FlockOperation, flock};
+
+    let config_directory =
+        File::open(&config.config_dir).map_err(|source| AppError::Filesystem {
+            context: format!(
+                "could not open configuration directory {} for workspace locking",
+                config.config_dir.display()
+            ),
+            source,
+        })?;
+    flock(&config_directory, FlockOperation::LockExclusive).map_err(|source| {
+        AppError::Filesystem {
+            context: format!(
+                "could not lock configuration directory {} for workspace mutation",
+                config.config_dir.display()
+            ),
+            source: source.into(),
+        }
+    })?;
+    Ok(Some(MutationLock {
+        _config_directory: config_directory,
+    }))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux", target_vendor = "apple")))]
+pub fn lock_mutations(_config: &Config) -> Result<Option<MutationLock>> {
+    Ok(None)
+}
+
 struct RepositoryRegistry<'a> {
     repository: &'a RepositoryConfig,
     worktrees: Vec<Worktree>,
@@ -36,6 +77,7 @@ struct RepositoryRegistry<'a> {
 
 pub fn scan(config: &Config, git: &Git) -> Result<Vec<WorkspaceState>> {
     let registries = load_registries(config, git)?;
+    let archive_root = config.archive_root();
     let mut candidates = BTreeMap::new();
 
     if config.workspaces_root.exists() {
@@ -55,6 +97,9 @@ pub fn scan(config: &Config, git: &Git) -> Result<Vec<WorkspaceState>> {
                 ),
                 source,
             })?;
+            if paths_match(&entry.path(), &archive_root) {
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
             candidates.insert(name, entry.path());
         }
@@ -62,6 +107,9 @@ pub fn scan(config: &Config, git: &Git) -> Result<Vec<WorkspaceState>> {
 
     for registry in &registries {
         for worktree in &registry.worktrees {
+            if path_is_within(&worktree.path, &archive_root) {
+                continue;
+            }
             if let Some(name) = workspace_name_for_path(&worktree.path, &config.workspaces_root) {
                 candidates
                     .entry(name.clone())
@@ -191,7 +239,7 @@ fn build_workspace(
         for checkout in checkout_ids {
             let destination = path.join(checkout.to_string());
             let metadata = metadata_by_checkout.remove(&checkout);
-            let member_exists = destination.exists();
+            let member_exists = path_occupied(&destination)?;
             let mut member_inconsistencies = Vec::new();
             if member_exists && metadata.is_none() {
                 member_inconsistencies.push(format!(
@@ -246,7 +294,7 @@ fn build_workspace(
                 members.push(MemberState {
                     id: CheckoutId::primary(&registry.repository.name),
                     canonical_path: registry.repository.path.clone(),
-                    exists: worktree.path.exists(),
+                    exists: path_occupied(&worktree.path)?,
                     registered: true,
                     path: worktree.path.clone(),
                     metadata: Some(worktree),
@@ -269,6 +317,42 @@ fn build_workspace(
         workspace_entries,
         inconsistencies,
     })
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    left.canonicalize()
+        .ok()
+        .zip(right.canonicalize().ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    if path.strip_prefix(root).is_ok() {
+        return true;
+    }
+    let Some(canonical_root) = root.canonicalize().ok() else {
+        return false;
+    };
+    if path.strip_prefix(&canonical_root).is_ok() {
+        return true;
+    }
+    path.canonicalize()
+        .ok()
+        .is_some_and(|path| path.strip_prefix(canonical_root).is_ok())
+}
+
+fn path_occupied(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(AppError::Filesystem {
+            context: format!("could not inspect workspace path {}", path.display()),
+            source,
+        }),
+    }
 }
 
 fn checkout_for_path(path: &Path, workspace_path: &Path) -> Option<CheckoutId> {

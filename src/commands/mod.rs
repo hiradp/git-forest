@@ -1,3 +1,4 @@
+mod archive;
 mod attach;
 mod create;
 mod fetch;
@@ -39,6 +40,7 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
             .map(CommandReport::WorkspacePath)
             .map(CommandOutcome::success),
         Command::Attach(arguments) => attach::run(config, git, herdr, arguments),
+        Command::Archive(arguments) => archive::run(config, git, arguments),
         Command::Remove(arguments) => remove::run(config, git, arguments),
     }
 }

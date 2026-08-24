@@ -125,6 +125,16 @@ Print the absolute path of an existing workspace.
 .BI attach " workspace"
 Open an existing workspace in a running Herdr session.
 .TP
+.BI archive " workspace"
+Remove every clean registered worktree in a workspace, preserve its branches,
+and move its workspace-local entries to
+.BI workspaces.root /.archive/ workspace .
+Archival rejects dirty or unregistered worktrees and archive destinations that
+conflict with an active workspace, never overwrites files, and is safe to repeat
+after partial execution.
+Repeating a successful archive reports it as already archived.
+Archived workspaces are excluded from the active workspace list and launcher.
+.TP
 .BI remove " workspace [checkout ...]"
 Remove all worktrees in a workspace or only the named checkouts.
 Removal rejects dirty or unregistered paths, uses
@@ -177,6 +187,10 @@ Forest reads a
 .B .forest.toml
 file with a supported version, configured repositories, and workspace path and
 branch templates.
+The
+.B .archive
+directory directly beneath the configured workspace root is reserved for local
+archived workspace contents.
 Unless
 .B \-\-config
 or

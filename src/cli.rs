@@ -65,6 +65,9 @@ pub enum Command {
     /// Open a workspace in Herdr
     Attach(AttachArgs),
 
+    /// Retire a workspace while preserving workspace-local entries
+    Archive(ArchiveArgs),
+
     /// Remove worktrees from a workspace
     Remove(RemoveArgs),
 
@@ -84,6 +87,7 @@ impl Command {
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
             Self::Attach(args) => args.output.json,
+            Self::Archive(args) => args.output.json,
             Self::Remove(args) => args.output.json,
             Self::Completions(_) => false,
         }
@@ -261,6 +265,16 @@ pub struct PathArgs {
 
 #[derive(Debug, Args)]
 pub struct AttachArgs {
+    /// Workspace name
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
+    pub workspace: String,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ArchiveArgs {
     /// Workspace name
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,

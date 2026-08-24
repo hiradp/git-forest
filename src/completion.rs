@@ -237,6 +237,7 @@ impl CompletionLine {
                     | "status"
                     | "path"
                     | "attach"
+                    | "archive"
                     | "remove"
                     | "completions"
             )

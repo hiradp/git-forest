@@ -134,7 +134,8 @@ Configuration precedence is:
    root.
 
 Workspace names and checkout slots must match
-`[A-Za-z0-9][A-Za-z0-9._-]*`. `.` and `..` are not valid names. A checkout is
+`[A-Za-z0-9][A-Za-z0-9._-]*`. `.` and `..` are not valid names. Forest reserves
+`.archive` directly beneath `workspaces.root` for archived workspaces. A checkout is
 selected as `repository` for its primary worktree or `repository@slot` for an
 additional worktree from the same canonical repository. A single request may
 not contain checkout identifiers that differ only by ASCII case because they
@@ -155,6 +156,7 @@ git forest list [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
+git forest archive <workspace> [--json]
 git forest remove <workspace> [<checkout>...] [--json]
 git forest completions <shell>
 ```
@@ -408,6 +410,35 @@ Herdr      w1
   ✓ 3-operator  created  /project/src/.workspaces/logical-slots/operator
 ```
 
+### `archive`
+
+Archives an entire workspace while preserving workspace-local files and
+directories. Forest first preflights every configured checkout, then removes all
+clean registered worktrees with `git worktree remove`. Branches are preserved.
+After every removal succeeds, Forest atomically moves the remaining workspace
+directory to `<workspaces.root>/.archive/<workspace>` without replacing an
+existing destination.
+
+```sh
+git forest archive logical-slots
+```
+
+Dirty worktrees, unregistered checkout paths, layout mismatches, a missing
+workspace directory, or an existing archive destination prevent archival.
+Workspace-local entries do not. A Git failure can leave a partially removed
+active workspace, and repeating the command safely resumes. Forest serializes
+its `create`, `add`, `remove`, and `archive` mutations for a configuration so
+they cannot race one another. Repeating a successful archive reports
+`already_archived`. Archived workspaces are excluded
+from `list`, the interactive launcher, active workspace completion, and `path`.
+Forest does not close matching Herdr processes. The archive is local dormant
+storage, not a compressed archive or backup.
+
+An archived name cannot be reused by `create` or `add` while its archive
+destination exists. Forest does not record a manifest of removed checkouts; to
+resume manually, move the archived directory back to its original workspace
+path and use `add` for the desired checkouts.
+
 ### `remove`
 
 Removal is deliberately conservative:
@@ -630,6 +661,34 @@ before an action could be selected. A branch created to track an explicit
 ```
 
 Workspace and tab status is one of `created`, `reused`, or `reconciled`.
+
+### Archive
+
+```json
+{
+  "workspace": "logical-slots",
+  "path": "/project/src/.workspaces/logical-slots",
+  "archive_path": "/project/src/.workspaces/.archive/logical-slots",
+  "repositories": [
+    {
+      "name": "api",
+      "checkout": "api",
+      "slot": null,
+      "path": "/project/src/.workspaces/logical-slots/api",
+      "status": "removed",
+      "message": null
+    }
+  ],
+  "status": "archived",
+  "preserved_entries": [
+    "/project/src/.workspaces/.archive/logical-slots/notes.md"
+  ],
+  "message": null
+}
+```
+
+Archive status is `archived`, `already_archived`, `conflict`, or `failed`.
+Repository removal statuses have the same meanings as for `remove`.
 
 ### Remove
 

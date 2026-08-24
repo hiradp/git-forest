@@ -168,6 +168,10 @@ impl WorkspaceFixture {
             .join("src/.workspaces")
             .join(workspace)
     }
+
+    fn archived_workspace(&self, workspace: &str) -> PathBuf {
+        self.workspace(".archive").join(workspace)
+    }
 }
 
 impl Fixture {
@@ -2546,6 +2550,352 @@ fn preserves_unexpected_workspace_files_on_removal() {
 }
 
 #[test]
+fn archives_all_worktrees_and_preserves_workspace_entries() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &[
+            "create",
+            "archived",
+            "alpha",
+            "alpha@part-2",
+            "beta",
+            "--json",
+        ],
+    ));
+    let workspace = fixture.workspace("archived");
+    fs::write(workspace.join("notes.md"), "keep\n").unwrap();
+    fs::create_dir(workspace.join("fixtures")).unwrap();
+    fs::write(workspace.join("fixtures/input.txt"), "input\n").unwrap();
+
+    let output = forest(&fixture.root, &["archive", "archived", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "archived");
+    assert_eq!(report["path"], path(&workspace));
+    assert_eq!(
+        report["archive_path"],
+        path(&fixture.archived_workspace("archived"))
+    );
+    assert!(
+        report["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|repository| repository["status"] == "removed")
+    );
+    assert_eq!(
+        report["preserved_entries"],
+        serde_json::json!([
+            path(&fixture.archived_workspace("archived").join("fixtures")),
+            path(&fixture.archived_workspace("archived").join("notes.md")),
+        ])
+    );
+    assert!(!workspace.exists());
+    assert_eq!(
+        fs::read_to_string(
+            fixture
+                .archived_workspace("archived")
+                .join("fixtures/input.txt")
+        )
+        .unwrap(),
+        "input\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.archived_workspace("archived").join("notes.md")).unwrap(),
+        "keep\n"
+    );
+    for (repository, branch) in [
+        ("alpha", "refs/heads/test/archived"),
+        ("alpha", "refs/heads/test/part-2"),
+        ("beta", "refs/heads/test/archived"),
+    ] {
+        git(
+            &fixture.canonical(repository),
+            &["show-ref", "--verify", "--quiet", branch],
+        );
+    }
+
+    let listed = forest(&fixture.root, &["list", "--json"]);
+    assert_success(&listed);
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["workspaces"], serde_json::json!([]));
+
+    let repeated = forest(&fixture.root, &["archive", "archived", "--json"]);
+    assert_success(&repeated);
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["status"], "already_archived");
+
+    let create = forest(&fixture.root, &["create", "archived", "--json"]);
+    assert!(!create.status.success());
+    assert!(create.stdout.is_empty());
+    assert!(
+        serde_json::from_slice::<Value>(&create.stderr).unwrap()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is archived")
+    );
+}
+
+#[test]
+fn dirty_worktree_blocks_archival_before_any_removal() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "dirty-archive", "alpha", "beta", "--json"],
+    ));
+    let workspace = fixture.workspace("dirty-archive");
+    fs::write(workspace.join("alpha/untracked.txt"), "dirty\n").unwrap();
+    fs::write(workspace.join("notes.md"), "keep\n").unwrap();
+
+    let output = forest(&fixture.root, &["archive", "dirty-archive", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert_eq!(report["repositories"][1]["status"], "not_run");
+    assert!(workspace.join("alpha").exists());
+    assert!(workspace.join("beta").exists());
+    assert!(workspace.join("notes.md").exists());
+    assert!(!fixture.archived_workspace("dirty-archive").exists());
+}
+
+#[test]
+fn archive_serializes_concurrent_workspace_mutations() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "serialized-archive", "alpha", "--json"],
+    ));
+
+    let bin = fixture.root.join("blocking-git-bin");
+    let signal = fixture.root.join("remove-started");
+    let release = fixture.root.join("release-remove");
+    fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
+  : > "$FOREST_REMOVE_SIGNAL"
+  while [ ! -e "$FOREST_REMOVE_RELEASE" ]; do sleep 0.02; done
+fi
+exec "$FOREST_REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+    let real_git = find_executable("git");
+
+    let mut archive = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env_remove("FOREST_CONFIG")
+        .env("PATH", &command_path)
+        .env("FOREST_REAL_GIT", real_git)
+        .env("FOREST_REMOVE_SIGNAL", &signal)
+        .env("FOREST_REMOVE_RELEASE", &release)
+        .args(["archive", "serialized-archive", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    for _ in 0..250 {
+        if signal.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if !signal.exists() {
+        archive.kill().unwrap();
+        archive.wait().unwrap();
+        panic!("archive did not reach worktree removal");
+    }
+
+    let mut add = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env_remove("FOREST_CONFIG")
+        .args(["add", "serialized-archive", "beta", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let add_was_blocked = add.try_wait().unwrap().is_none();
+
+    fs::write(&release, "continue\n").unwrap();
+    let archive = archive.wait_with_output().unwrap();
+    let add = add.wait_with_output().unwrap();
+
+    assert_success(&archive);
+    assert!(add_was_blocked, "concurrent add was not serialized");
+    assert!(!add.status.success());
+    assert!(fixture.archived_workspace("serialized-archive").is_dir());
+    assert!(!fixture.workspace("serialized-archive").exists());
+    assert!(
+        String::from_utf8(add.stderr)
+            .unwrap()
+            .contains("is archived")
+    );
+}
+
+#[test]
+fn existing_archive_destination_blocks_removal() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "archive-conflict", "alpha", "--json"],
+    ));
+    let archive = fixture.archived_workspace("archive-conflict");
+    fs::create_dir_all(&archive).unwrap();
+    fs::write(archive.join("keep.txt"), "existing\n").unwrap();
+
+    let output = forest(&fixture.root, &["archive", "archive-conflict", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
+    assert!(fixture.workspace("archive-conflict").join("alpha").exists());
+    assert_eq!(
+        fs::read_to_string(archive.join("keep.txt")).unwrap(),
+        "existing\n"
+    );
+}
+
+#[test]
+fn dangling_archive_destination_blocks_removal_and_name_reuse() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "dangling-archive", "alpha", "--json"],
+    ));
+    let archive = fixture.archived_workspace("dangling-archive");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    symlink("missing-target", &archive).unwrap();
+
+    let output = forest(&fixture.root, &["archive", "dangling-archive", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(fixture.workspace("dangling-archive").join("alpha").exists());
+    assert!(
+        fs::symlink_metadata(&archive)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let reserved = fixture.archived_workspace("reserved-name");
+    symlink("missing-target", &reserved).unwrap();
+    let create = forest(
+        &fixture.root,
+        &["create", "reserved-name", "alpha", "--json"],
+    );
+    assert!(!create.status.success());
+    assert!(!fixture.workspace("reserved-name").exists());
+}
+
+#[test]
+fn dangling_checkout_symlink_blocks_archival_before_removal() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "dangling-checkout", "beta", "--json"],
+    ));
+    let workspace = fixture.workspace("dangling-checkout");
+    symlink("missing-target", workspace.join("alpha")).unwrap();
+
+    let output = forest(&fixture.root, &["archive", "dangling-checkout", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert_eq!(report["repositories"][0]["checkout"], "alpha");
+    assert_eq!(report["repositories"][0]["status"], "conflict");
+    assert_eq!(report["repositories"][1]["checkout"], "beta");
+    assert_eq!(report["repositories"][1]["status"], "not_run");
+    assert!(workspace.join("beta").exists());
+    assert!(
+        fs::symlink_metadata(workspace.join("alpha"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn archive_rejects_workspace_name_casing_mismatches() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "ArchiveCase", "alpha", "--json"],
+    ));
+
+    let output = forest(&fixture.root, &["archive", "archivecase", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("use \"ArchiveCase\"")
+    );
+    assert!(fixture.workspace("ArchiveCase").join("alpha").exists());
+    assert!(!fixture.archived_workspace("ArchiveCase").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_scan_excludes_case_aliased_archive_storage() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "archive-source", "alpha", "--json"],
+    ));
+    let active = fixture.workspace("archive-source");
+    let archived = fixture.workspace(".Archive").join("old/alpha");
+    fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    git(
+        &fixture.canonical("alpha"),
+        &[
+            "worktree",
+            "move",
+            path(&active.join("alpha")),
+            path(&archived),
+        ],
+    );
+    fs::remove_dir(&active).unwrap();
+
+    let output = forest(&fixture.root, &["list", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["workspaces"], serde_json::json!([]));
+}
+
+#[test]
 fn treats_non_checkout_siblings_as_workspace_entries() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
@@ -2744,6 +3094,19 @@ fn dynamically_completes_workspaces_for_attach() {
 
     assert!(candidates.contains(&"logical-slots".to_owned()));
     assert!(!candidates.contains(&"review-123".to_owned()));
+}
+
+#[test]
+fn dynamically_completes_only_active_workspaces_for_archive() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("active-topic")).unwrap();
+    fs::create_dir_all(fixture.archived_workspace("archived-topic")).unwrap();
+
+    let active = completions(&fixture.root, &["git-forest", "archive", "active"]);
+    let archived = completions(&fixture.root, &["git-forest", "archive", "archived"]);
+
+    assert!(active.contains(&"active-topic".to_owned()));
+    assert!(!archived.contains(&"archived-topic".to_owned()));
 }
 
 #[test]

@@ -30,12 +30,35 @@ enum Preflight {
 }
 
 pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<CommandOutcome> {
-    let workspace_path = config.workspace_path(&arguments.workspace)?;
-    let requested = validate_requested(config, &arguments.checkouts)?;
+    let _lock = workspace::lock_mutations(config)?;
+    run_inner(
+        config,
+        git,
+        &arguments.workspace,
+        &arguments.checkouts,
+        true,
+    )
+}
+
+pub(crate) fn run_for_archive(
+    config: &Config,
+    git: &Git,
+    workspace: &str,
+) -> Result<CommandOutcome> {
+    run_inner(config, git, workspace, &[], false)
+}
+
+fn run_inner(
+    config: &Config,
+    git: &Git,
+    workspace: &str,
+    checkouts: &[CheckoutId],
+    remove_empty_workspace: bool,
+) -> Result<CommandOutcome> {
+    let workspace_path = config.workspace_path(workspace)?;
+    let requested = validate_requested(config, checkouts)?;
     let mut states = workspace::scan(config, git)?;
-    let state = states
-        .drain(..)
-        .find(|workspace| workspace.name == arguments.workspace);
+    let state = states.drain(..).find(|state| state.name == workspace);
 
     let selected = if requested.is_empty() {
         state
@@ -89,7 +112,7 @@ pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<Command
             .collect();
         return Ok(CommandOutcome {
             report: CommandReport::WorkspaceRemoval(WorkspaceRemovalReport {
-                workspace: arguments.workspace.clone(),
+                workspace: workspace.to_owned(),
                 path: workspace_path.clone(),
                 repositories,
                 workspace_removed: false,
@@ -140,25 +163,26 @@ pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<Command
     }
 
     let mut remaining_entries = remaining_entries(&workspace_path)?;
-    let workspace_removed = if workspace_path.is_dir() && remaining_entries.is_empty() {
-        fs::remove_dir(&workspace_path).map_err(|source| AppError::Filesystem {
-            context: format!(
-                "could not remove empty workspace directory {}",
-                workspace_path.display()
-            ),
-            source,
-        })?;
-        true
-    } else {
-        false
-    };
+    let workspace_removed =
+        if remove_empty_workspace && workspace_path.is_dir() && remaining_entries.is_empty() {
+            fs::remove_dir(&workspace_path).map_err(|source| AppError::Filesystem {
+                context: format!(
+                    "could not remove empty workspace directory {}",
+                    workspace_path.display()
+                ),
+                source,
+            })?;
+            true
+        } else {
+            false
+        };
     if workspace_removed {
         remaining_entries.clear();
     }
 
     Ok(CommandOutcome {
         report: CommandReport::WorkspaceRemoval(WorkspaceRemovalReport {
-            workspace: arguments.workspace.clone(),
+            workspace: workspace.to_owned(),
             path: workspace_path,
             repositories,
             workspace_removed,
