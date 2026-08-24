@@ -2546,6 +2546,36 @@ fn preserves_unexpected_workspace_files_on_removal() {
 }
 
 #[test]
+fn treats_non_checkout_siblings_as_workspace_entries() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "workspace-files", "--json"],
+    ));
+    let note = fixture.workspace("workspace-files").join("notes.md");
+    fs::write(&note, "keep\n").unwrap();
+
+    let json = forest(&fixture.root, &["list", "--json"]);
+    assert_success(&json);
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        report["workspaces"][0]["unexpected_entries"][0],
+        path(&note)
+    );
+    assert_eq!(
+        report["workspaces"][0]["inconsistencies"],
+        serde_json::json!([])
+    );
+
+    let human = forest(&fixture.root, &["list"]);
+    assert_success(&human);
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Workspace entries"));
+    assert!(human.contains(path(&note)));
+    assert!(!human.contains("unexpected"));
+}
+
+#[test]
 fn rejects_a_conflicting_destination_path() {
     let fixture = WorkspaceFixture::new();
     let destination = fixture.workspace("occupied").join("alpha");

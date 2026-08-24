@@ -12,7 +12,7 @@ pub struct WorkspaceState {
     pub path: PathBuf,
     pub exists: bool,
     pub members: Vec<MemberState>,
-    pub unexpected_entries: Vec<PathBuf>,
+    pub workspace_entries: Vec<PathBuf>,
     pub inconsistencies: Vec<String>,
 }
 
@@ -131,7 +131,7 @@ fn build_workspace(
         .map(|repository| repository.name.as_str())
         .collect::<HashSet<_>>();
     let mut filesystem_checkouts = BTreeMap::new();
-    let mut unexpected_entries = Vec::new();
+    let mut workspace_entries = Vec::new();
     if exists {
         let entries = fs::read_dir(&path).map_err(|source| AppError::Filesystem {
             context: format!("could not read workspace {}", path.display()),
@@ -150,10 +150,10 @@ fn build_workspace(
             if let Some(checkout) = checkout {
                 filesystem_checkouts.insert(checkout, entry.path());
             } else {
-                unexpected_entries.push(entry.path());
+                workspace_entries.push(entry.path());
             }
         }
-        unexpected_entries.sort();
+        workspace_entries.sort();
     }
 
     let mut members = Vec::new();
@@ -261,24 +261,12 @@ fn build_workspace(
         }
     }
 
-    if !unexpected_entries.is_empty() {
-        inconsistencies.push(format!(
-            "workspace contains {} unexpected entr{}",
-            unexpected_entries.len(),
-            if unexpected_entries.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            }
-        ));
-    }
-
     Ok(WorkspaceState {
         name,
         path,
         exists,
         members,
-        unexpected_entries,
+        workspace_entries,
         inconsistencies,
     })
 }

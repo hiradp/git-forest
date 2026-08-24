@@ -344,8 +344,10 @@ Colors are enabled only when stdout is a terminal and can be disabled with
 
 `list` reconciles workspace directories with every canonical repository's Git
 worktree metadata. Primary and named checkouts are reported separately. It
-reports unregistered paths, missing registered paths, unexpected entries, and
-layout mismatches.
+reports unregistered paths, missing registered paths, workspace-local entries,
+and layout mismatches. Workspace-local entries are direct children that are not
+configured checkout paths; they are supported and do not make the workspace
+inconsistent. The JSON field remains `unexpected_entries` for compatibility.
 
 `status` additionally reports:
 
@@ -418,7 +420,7 @@ Removal is deliberately conservative:
 - branches are never deleted;
 - there is no force option;
 - the workspace directory is removed only when it is empty;
-- unexpected files are reported and preserved.
+- workspace-local entries are reported and preserved.
 
 Removing only named checkout identifiers leaves other worktrees in place.
 `remove stacked api@part-2` removes only that named checkout; `api` continues

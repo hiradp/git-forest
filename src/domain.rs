@@ -133,7 +133,8 @@ pub struct WorkspaceListEntry {
     pub path: PathBuf,
     pub exists: bool,
     pub repositories: Vec<WorkspaceListRepository>,
-    pub unexpected_entries: Vec<PathBuf>,
+    #[serde(rename = "unexpected_entries")]
+    pub workspace_entries: Vec<PathBuf>,
     pub inconsistencies: Vec<String>,
 }
 
@@ -161,7 +162,8 @@ pub struct WorkspaceStatusEntry {
     pub path: PathBuf,
     pub exists: bool,
     pub repositories: Vec<RepositoryStatus>,
-    pub unexpected_entries: Vec<PathBuf>,
+    #[serde(rename = "unexpected_entries")]
+    pub workspace_entries: Vec<PathBuf>,
     pub inconsistencies: Vec<String>,
 }
 

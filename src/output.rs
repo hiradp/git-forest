@@ -538,6 +538,8 @@ fn render_workspace_list(
         render_inconsistencies(writer, &repository.inconsistencies, "      ", styles)?;
     }
 
+    render_workspace_entries(writer, &workspace.workspace_entries, styles)?;
+
     for inconsistency in &workspace.inconsistencies {
         if !workspace.repositories.iter().any(|repository| {
             repository
@@ -654,6 +656,8 @@ fn render_workspace_status(
         render_inconsistencies(writer, &repository.inconsistencies, "      ", styles)?;
     }
 
+    render_workspace_entries(writer, &workspace.workspace_entries, styles)?;
+
     for inconsistency in &workspace.inconsistencies {
         if !workspace.repositories.iter().any(|repository| {
             repository
@@ -663,6 +667,28 @@ fn render_workspace_status(
         }) {
             render_inconsistency(writer, inconsistency, "  ", styles)?;
         }
+    }
+    Ok(())
+}
+
+fn render_workspace_entries(
+    writer: &mut impl Write,
+    entries: &[std::path::PathBuf],
+    styles: Styles,
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(
+        writer,
+        "\n{}Workspace entries{}",
+        styles.bold(),
+        styles.reset()
+    )
+    .map_err(AppError::WriteOutput)?;
+    for entry in entries {
+        writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
     }
     Ok(())
 }

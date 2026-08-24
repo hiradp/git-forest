@@ -31,7 +31,7 @@ pub fn run(config: &Config, git: &Git, arguments: &StatusArgs) -> Result<Workspa
             path: state.path,
             exists: state.exists,
             repositories,
-            unexpected_entries: state.unexpected_entries,
+            workspace_entries: state.workspace_entries,
             inconsistencies: state.inconsistencies,
         });
     }

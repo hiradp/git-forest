@@ -32,7 +32,7 @@ pub fn run(config: &Config, git: &Git) -> Result<WorkspacesListReport> {
                     inconsistencies: member.inconsistencies,
                 })
                 .collect(),
-            unexpected_entries: workspace.unexpected_entries,
+            workspace_entries: workspace.workspace_entries,
             inconsistencies: workspace.inconsistencies,
         })
         .collect();
