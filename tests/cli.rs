@@ -2424,6 +2424,115 @@ fn dirty_named_checkout_blocks_remove_all() {
 }
 
 #[test]
+fn force_removes_dirty_worktrees() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "force-dirty", "alpha", "beta", "--json"],
+    ));
+    let dirty = fixture.workspace("force-dirty").join("beta");
+    fs::write(dirty.join("untracked.txt"), "dirty\n").unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["remove", "force-dirty", "--force", "--json"],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repositories = report["repositories"].as_array().unwrap();
+    let alpha = repositories
+        .iter()
+        .find(|repository| repository["checkout"] == "alpha")
+        .unwrap();
+    assert_eq!(alpha["status"], "removed");
+    assert_eq!(alpha["message"], Value::Null);
+    let beta = repositories
+        .iter()
+        .find(|repository| repository["checkout"] == "beta")
+        .unwrap();
+    assert_eq!(beta["status"], "removed");
+    assert_eq!(
+        beta["message"],
+        "discarded modified, untracked, or ignored files (--force)"
+    );
+    assert_eq!(report["workspace_removed"], true);
+    assert!(!fixture.workspace("force-dirty").exists());
+}
+
+#[test]
+fn force_remove_still_rejects_unregistered_paths() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "force-unregistered", "alpha", "--json"],
+    ));
+    let stray = fixture.workspace("force-unregistered").join("beta");
+    fs::create_dir(&stray).unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["remove", "force-unregistered", "--force", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repositories = report["repositories"].as_array().unwrap();
+    let beta = repositories
+        .iter()
+        .find(|repository| repository["checkout"] == "beta")
+        .unwrap();
+    assert_eq!(beta["status"], "conflict");
+    assert!(beta["message"].as_str().unwrap().contains("not registered"));
+    assert!(stray.exists());
+    assert!(
+        fixture
+            .workspace("force-unregistered")
+            .join("alpha")
+            .exists()
+    );
+}
+
+#[test]
+fn force_archives_workspace_with_dirty_worktrees() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "force-archive", "alpha", "--json"],
+    ));
+    let workspace = fixture.workspace("force-archive");
+    fs::write(workspace.join("alpha/untracked.txt"), "dirty\n").unwrap();
+    fs::write(workspace.join("notes.md"), "keep\n").unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["archive", "force-archive", "--force", "--json"],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "archived");
+    assert_eq!(report["repositories"][0]["status"], "removed");
+    assert_eq!(
+        report["repositories"][0]["message"],
+        "discarded modified, untracked, or ignored files (--force)"
+    );
+    assert!(!workspace.exists());
+    assert!(
+        fixture
+            .archived_workspace("force-archive")
+            .join("notes.md")
+            .exists()
+    );
+    assert!(
+        !fixture
+            .archived_workspace("force-archive")
+            .join("alpha")
+            .exists()
+    );
+}
+
+#[test]
 fn removes_stale_named_checkout_registration() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(

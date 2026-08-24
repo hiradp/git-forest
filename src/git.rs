@@ -519,15 +519,18 @@ impl Git {
         self.run(repository, ["update-ref", local_ref, new_oid, old_oid])
     }
 
-    pub fn remove_worktree(&self, repository: &Path, worktree: &Path) -> Result<Output> {
-        self.run(
-            repository,
-            [
-                OsStr::new("worktree"),
-                OsStr::new("remove"),
-                worktree.as_os_str(),
-            ],
-        )
+    pub fn remove_worktree(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        force: bool,
+    ) -> Result<Output> {
+        let mut arguments = vec![OsStr::new("worktree"), OsStr::new("remove")];
+        if force {
+            arguments.push(OsStr::new("--force"));
+        }
+        arguments.push(worktree.as_os_str());
+        self.run(repository, arguments)
     }
 
     pub fn add_existing_branch(

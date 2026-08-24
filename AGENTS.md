@@ -14,8 +14,10 @@ configured canonical repositories.
 - Do not add implicit `fetch`, `pull`, clone, or other network operations.
 - Creation must preflight every requested repository before mutation and remain
   safe to rerun after partial execution.
-- Removal must use `git worktree remove`, preserve branches, reject dirty or
-  unregistered paths, and never offer force behavior.
+- Removal must use `git worktree remove`, preserve branches, and reject
+  unregistered paths. Dirty worktrees (modified, untracked, or ignored files)
+  are refused unless the user passes an explicit opt-in `--force`; force must
+  never be the default or implied.
 - Keep human output on stdout, diagnostics on stderr, and JSON streams free of
   non-JSON text.
 - Keep command report field names stable. Update README examples and integration

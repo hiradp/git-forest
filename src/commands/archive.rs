@@ -141,7 +141,7 @@ pub fn run(config: &Config, git: &Git, arguments: &ArchiveArgs) -> Result<Comman
         ));
     }
 
-    let removal = remove::run_for_archive(config, git, &arguments.workspace)?;
+    let removal = remove::run_for_archive(config, git, &arguments.workspace, arguments.force)?;
     let CommandReport::WorkspaceRemoval(removal_report) = removal.report else {
         unreachable!("archive removal returned a different report type")
     };

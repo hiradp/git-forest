@@ -156,8 +156,8 @@ git forest list [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
-git forest archive <workspace> [--json]
-git forest remove <workspace> [<checkout>...] [--json]
+git forest archive <workspace> [--force] [--json]
+git forest remove <workspace> [<checkout>...] [--force] [--json]
 git forest completions <shell>
 ```
 
@@ -425,6 +425,8 @@ git forest archive logical-slots
 
 Dirty worktrees, unregistered checkout paths, layout mismatches, a missing
 workspace directory, or an existing archive destination prevent archival.
+Passing `--force` removes dirty worktrees anyway, discarding their modified,
+untracked, and ignored files; all other conflicts still prevent archival.
 Workspace-local entries do not. A Git failure can leave a partially removed
 active workspace, and repeating the command safely resumes. Forest serializes
 its `create`, `add`, `remove`, and `archive` mutations for a configuration so
@@ -443,13 +445,13 @@ path and use `add` for the desired checkouts.
 
 Removal is deliberately conservative:
 
-- modified, untracked, and ignored files prevent removal;
+- modified, untracked, and ignored files prevent removal unless `--force` is
+  passed, in which case they are discarded via `git worktree remove --force`;
 - every selected path must be registered with its configured canonical
-  repository;
+  repository, even with `--force`;
 - removal always uses `git worktree remove`, including to clean up registered
   worktrees whose paths are already missing;
 - branches are never deleted;
-- there is no force option;
 - the workspace directory is removed only when it is empty;
 - workspace-local entries are reported and preserved.
 

@@ -279,6 +279,10 @@ pub struct ArchiveArgs {
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
+    /// Remove worktrees even if they contain modified, untracked, or ignored files
+    #[arg(long)]
+    pub force: bool,
+
     #[command(flatten)]
     pub output: OutputArgs,
 }
@@ -291,6 +295,10 @@ pub struct RemoveArgs {
     /// Remove only these repository checkouts
     #[arg(add = ArgValueCompleter::new(completion::checkouts))]
     pub checkouts: Vec<CheckoutId>,
+
+    /// Remove worktrees even if they contain modified, untracked, or ignored files
+    #[arg(long)]
+    pub force: bool,
 
     #[command(flatten)]
     pub output: OutputArgs,

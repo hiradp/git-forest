@@ -17,6 +17,7 @@ enum Preflight {
         checkout: CheckoutId,
         canonical_path: PathBuf,
         path: PathBuf,
+        note: Option<String>,
     },
     AlreadyAbsent {
         checkout: CheckoutId,
@@ -37,6 +38,7 @@ pub fn run(config: &Config, git: &Git, arguments: &RemoveArgs) -> Result<Command
         &arguments.workspace,
         &arguments.checkouts,
         true,
+        arguments.force,
     )
 }
 
@@ -44,8 +46,9 @@ pub(crate) fn run_for_archive(
     config: &Config,
     git: &Git,
     workspace: &str,
+    force: bool,
 ) -> Result<CommandOutcome> {
-    run_inner(config, git, workspace, &[], false)
+    run_inner(config, git, workspace, &[], false, force)
 }
 
 fn run_inner(
@@ -54,6 +57,7 @@ fn run_inner(
     workspace: &str,
     checkouts: &[CheckoutId],
     remove_empty_workspace: bool,
+    force: bool,
 ) -> Result<CommandOutcome> {
     let workspace_path = config.workspace_path(workspace)?;
     let requested = validate_requested(config, checkouts)?;
@@ -84,7 +88,7 @@ fn run_inner(
                 .iter()
                 .find(|member| member.id == checkout)
         });
-        preflight.push(preflight_member(git, checkout, path, member)?);
+        preflight.push(preflight_member(git, checkout, path, member, force)?);
     }
 
     if preflight
@@ -144,10 +148,11 @@ fn run_inner(
                 checkout,
                 canonical_path,
                 path,
+                note,
             } => {
-                let output = git.remove_worktree(&canonical_path, &path)?;
+                let output = git.remove_worktree(&canonical_path, &path, force)?;
                 if output.status.success() {
-                    repositories.push(removal_report(checkout, path, RemovalStatus::Removed, None));
+                    repositories.push(removal_report(checkout, path, RemovalStatus::Removed, note));
                 } else {
                     failed = true;
                     repositories.push(removal_report(
@@ -240,6 +245,7 @@ fn preflight_member(
     checkout: CheckoutId,
     path: PathBuf,
     member: Option<&MemberState>,
+    force: bool,
 ) -> Result<Preflight> {
     let Some(member) = member else {
         return Ok(Preflight::AlreadyAbsent { checkout, path });
@@ -265,6 +271,7 @@ fn preflight_member(
             checkout,
             canonical_path: member.canonical_path.clone(),
             path,
+            note: None,
         });
     }
     if member.exists && !member.registered {
@@ -280,6 +287,12 @@ fn preflight_member(
     }
 
     match git.is_clean_for_removal(&member.path)? {
+        Ok(false) if force => Ok(Preflight::Ready {
+            checkout,
+            canonical_path: member.canonical_path.clone(),
+            path,
+            note: Some("discarded modified, untracked, or ignored files (--force)".to_owned()),
+        }),
         Ok(false) => Ok(Preflight::Conflict {
             checkout,
             path,
@@ -289,6 +302,7 @@ fn preflight_member(
             checkout,
             canonical_path: member.canonical_path.clone(),
             path,
+            note: None,
         }),
         Err(message) => Ok(Preflight::Conflict {
             checkout,
