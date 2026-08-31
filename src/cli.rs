@@ -65,6 +65,9 @@ pub enum Command {
     /// Open a workspace in Herdr
     Attach(AttachArgs),
 
+    /// Rename a workspace without renaming its branches
+    Rename(RenameArgs),
+
     /// Retire a workspace while preserving workspace-local entries
     Archive(ArchiveArgs),
 
@@ -87,6 +90,7 @@ impl Command {
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
             Self::Attach(args) => args.output.json,
+            Self::Rename(args) => args.output.json,
             Self::Archive(args) => args.output.json,
             Self::Remove(args) => args.output.json,
             Self::Completions(_) => false,
@@ -268,6 +272,19 @@ pub struct AttachArgs {
     /// Workspace name
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct RenameArgs {
+    /// Current workspace name
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
+    pub workspace: String,
+
+    /// New workspace name
+    pub new_workspace: String,
 
     #[command(flatten)]
     pub output: OutputArgs,

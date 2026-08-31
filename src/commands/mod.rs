@@ -5,6 +5,7 @@ mod fetch;
 mod list;
 mod path;
 mod remove;
+mod rename;
 mod repos;
 mod setup;
 mod status;
@@ -40,6 +41,7 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
             .map(CommandReport::WorkspacePath)
             .map(CommandOutcome::success),
         Command::Attach(arguments) => attach::run(config, git, herdr, arguments),
+        Command::Rename(arguments) => rename::run(config, git, arguments),
         Command::Archive(arguments) => archive::run(config, git, arguments),
         Command::Remove(arguments) => remove::run(config, git, arguments),
     }

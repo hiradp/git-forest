@@ -217,6 +217,46 @@ pub enum AttachStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WorkspaceRenameReport {
+    pub old_workspace: String,
+    pub old_path: PathBuf,
+    pub workspace: String,
+    pub path: PathBuf,
+    pub repositories: Vec<RepositoryRename>,
+    pub status: WorkspaceRenameStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepositoryRename {
+    pub name: String,
+    pub checkout: String,
+    pub slot: Option<String>,
+    pub old_path: PathBuf,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub status: RenameStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceRenameStatus {
+    Renamed,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenameStatus {
+    Repaired,
+    AlreadyRepaired,
+    Failed,
+    NotRun,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorkspaceArchiveReport {
     pub workspace: String,
     pub path: PathBuf,
@@ -291,6 +331,7 @@ pub enum CommandReport {
     WorkspacesStatus(WorkspacesStatusReport),
     WorkspacePath(WorkspacePathReport),
     WorkspaceAttach(WorkspaceAttachReport),
+    WorkspaceRename(WorkspaceRenameReport),
     WorkspaceArchive(WorkspaceArchiveReport),
     WorkspaceRemoval(WorkspaceRemovalReport),
 }

@@ -156,6 +156,7 @@ git forest list [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
+git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
 git forest remove <workspace> [<checkout>...] [--force] [--json]
 git forest completions <shell>
@@ -410,6 +411,34 @@ Herdr      w1
   ✓ 3-operator  created  /project/src/.workspaces/logical-slots/operator
 ```
 
+### `rename`
+
+Renames an active workspace without changing its branches, commits, upstreams,
+or working tree contents:
+
+```sh
+git forest rename logical-slots review-123
+```
+
+Forest preflights the complete workspace, atomically moves its directory, and
+uses `git worktree repair` to update each canonical repository's worktree
+metadata. Dirty, untracked, and ignored files are preserved, as are
+workspace-local entries. An inconsistent source, an active destination, or an
+archive at `.archive/<new-workspace>` prevents all mutation. Rename never
+fetches and has no `--force` option.
+
+Existing branch names are authoritative and remain unchanged. If the branch
+template uses `{workspace}`, a checkout created after the rename uses the new
+workspace name while existing checkouts retain branches rendered with the old
+name. Forest cannot safely infer which branches came from the template rather
+than an explicit `--branch` override.
+
+A Git repair failure can leave the directory at the new path with one or more
+registrations still pointing to the old path. Repeating the same rename command
+recognizes that partial state and resumes repair. Forest does not update Herdr
+runtime metadata, so a later `attach` under the new name may create a new Herdr
+workspace rather than reuse one attached before the rename.
+
 ### `archive`
 
 Archives an entire workspace while preserving workspace-local files and
@@ -429,9 +458,9 @@ Passing `--force` removes dirty worktrees anyway, discarding their modified,
 untracked, and ignored files; all other conflicts still prevent archival.
 Workspace-local entries do not. A Git failure can leave a partially removed
 active workspace, and repeating the command safely resumes. Forest serializes
-its `create`, `add`, `remove`, and `archive` mutations for a configuration so
-they cannot race one another. Repeating a successful archive reports
-`already_archived`. Archived workspaces are excluded
+its `create`, `add`, `rename`, `remove`, and `archive` mutations for a
+configuration so they cannot race one another. Repeating a successful archive
+reports `already_archived`. Archived workspaces are excluded
 from `list`, the interactive launcher, active workspace completion, and `path`.
 Forest does not close matching Herdr processes. The archive is local dormant
 storage, not a compressed archive or backup.
@@ -663,6 +692,34 @@ before an action could be selected. A branch created to track an explicit
 ```
 
 Workspace and tab status is one of `created`, `reused`, or `reconciled`.
+
+### Rename
+
+```json
+{
+  "old_workspace": "logical-slots",
+  "old_path": "/project/src/.workspaces/logical-slots",
+  "workspace": "review-123",
+  "path": "/project/src/.workspaces/review-123",
+  "repositories": [
+    {
+      "name": "api",
+      "checkout": "api",
+      "slot": null,
+      "old_path": "/project/src/.workspaces/logical-slots/api",
+      "path": "/project/src/.workspaces/review-123/api",
+      "branch": "user/logical-slots",
+      "status": "repaired",
+      "message": null
+    }
+  ],
+  "status": "renamed",
+  "message": null
+}
+```
+
+Workspace rename status is `renamed`, `conflict`, or `failed`. Repository
+status is `repaired`, `already_repaired`, `failed`, or `not_run`.
 
 ### Archive
 

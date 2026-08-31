@@ -2494,6 +2494,244 @@ fn force_remove_still_rejects_unregistered_paths() {
 }
 
 #[test]
+fn renames_workspace_and_repairs_worktrees_without_renaming_branches() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &[
+            "create",
+            "old-topic",
+            "alpha",
+            "alpha@part-2",
+            "beta",
+            "--json",
+        ],
+    ));
+    let old_workspace = fixture.workspace("old-topic");
+    let new_workspace = fixture.workspace("review-123");
+    fs::write(old_workspace.join("alpha/README.md"), "modified\n").unwrap();
+    fs::write(old_workspace.join("alpha/untracked.txt"), "dirty\n").unwrap();
+    fs::write(old_workspace.join("notes.md"), "keep\n").unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["rename", "old-topic", "review-123", "--json"],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["old_workspace"], "old-topic");
+    assert_eq!(report["old_path"], path(&old_workspace));
+    assert_eq!(report["workspace"], "review-123");
+    assert_eq!(report["path"], path(&new_workspace));
+    assert_eq!(report["status"], "renamed");
+    assert!(
+        report["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|repository| repository["status"] == "repaired")
+    );
+    assert!(!old_workspace.exists());
+    assert_eq!(
+        fs::read_to_string(new_workspace.join("alpha/README.md")).unwrap(),
+        "modified\n"
+    );
+    assert_eq!(
+        fs::read_to_string(new_workspace.join("alpha/untracked.txt")).unwrap(),
+        "dirty\n"
+    );
+    assert_eq!(
+        fs::read_to_string(new_workspace.join("notes.md")).unwrap(),
+        "keep\n"
+    );
+    assert_eq!(
+        git_stdout(&new_workspace.join("alpha"), &["branch", "--show-current"]),
+        "test/old-topic"
+    );
+    assert_eq!(
+        git_stdout(
+            &new_workspace.join("alpha@part-2"),
+            &["branch", "--show-current"]
+        ),
+        "test/part-2"
+    );
+    for (repository, checkout) in [
+        ("alpha", "alpha"),
+        ("alpha", "alpha@part-2"),
+        ("beta", "beta"),
+    ] {
+        let worktrees = git_stdout(
+            &fixture.canonical(repository),
+            &["worktree", "list", "--porcelain"],
+        );
+        assert!(worktrees.contains(path(&new_workspace.join(checkout))));
+        assert!(!worktrees.contains(path(&old_workspace.join(checkout))));
+    }
+
+    let listed = forest(&fixture.root, &["list", "--json"]);
+    assert_success(&listed);
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["workspaces"][0]["name"], "review-123");
+    assert_eq!(listed["workspaces"].as_array().unwrap().len(), 1);
+
+    assert_success(&forest(
+        &fixture.root,
+        &["add", "review-123", "gamma", "--json"],
+    ));
+    assert_eq!(
+        git_stdout(&new_workspace.join("gamma"), &["branch", "--show-current"]),
+        "test/review-123"
+    );
+    assert_eq!(
+        git_stdout(&new_workspace.join("alpha"), &["branch", "--show-current"]),
+        "test/old-topic"
+    );
+}
+
+#[test]
+fn renames_empty_workspace_and_preserves_local_entries() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "scratch", "--json"]));
+    fs::write(fixture.workspace("scratch").join("notes.md"), "keep\n").unwrap();
+
+    let output = forest(&fixture.root, &["rename", "scratch", "notes", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "renamed");
+    assert_eq!(report["repositories"], serde_json::json!([]));
+    assert!(!fixture.workspace("scratch").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.workspace("notes").join("notes.md")).unwrap(),
+        "keep\n"
+    );
+}
+
+#[test]
+fn rename_rejects_active_and_archived_destinations_before_mutation() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "rename-source", "alpha", "--json"],
+    ));
+    fs::create_dir_all(fixture.workspace("occupied")).unwrap();
+
+    let occupied = forest(
+        &fixture.root,
+        &["rename", "rename-source", "occupied", "--json"],
+    );
+
+    assert!(!occupied.status.success());
+    let report: Value = serde_json::from_slice(&occupied.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(fixture.workspace("rename-source").join("alpha").exists());
+
+    fs::create_dir_all(fixture.archived_workspace("reserved")).unwrap();
+    let archived = forest(
+        &fixture.root,
+        &["rename", "rename-source", "reserved", "--json"],
+    );
+    assert!(!archived.status.success());
+    let report: Value = serde_json::from_slice(&archived.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(report["message"].as_str().unwrap().contains("reserved"));
+    assert!(fixture.workspace("rename-source").join("alpha").exists());
+}
+
+#[test]
+fn rename_rejects_inconsistent_workspaces_before_mutation() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "inconsistent-rename", "--json"],
+    ));
+    fs::create_dir(fixture.workspace("inconsistent-rename").join("alpha")).unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["rename", "inconsistent-rename", "renamed", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(report["message"].as_str().unwrap().contains("inconsistent"));
+    assert!(fixture.workspace("inconsistent-rename").exists());
+    assert!(!fixture.workspace("renamed").exists());
+}
+
+#[test]
+fn rename_resumes_after_a_worktree_repair_failure() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "partial-rename", "alpha", "beta", "--json"],
+    ));
+    let fake_bin = fixture.root.join("rename-fake-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        r#"#!/bin/sh
+if [ "$1" = "-C" ] && [ "$2" = "$FAIL_REPO" ] && [ "$3" = "worktree" ] && [ "$4" = "repair" ]; then
+  echo "simulated worktree repair failure" >&2
+  exit 1
+fi
+exec "$REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_git, permissions).unwrap();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    let command_path = std::env::join_paths(paths).unwrap();
+
+    let partial = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env("PATH", command_path)
+        .env("REAL_GIT", find_executable("git"))
+        .env(
+            "FAIL_REPO",
+            fixture.canonical("beta").canonicalize().unwrap(),
+        )
+        .args(["rename", "partial-rename", "resumed-rename", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!partial.status.success());
+    let report: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["repositories"][0]["status"], "repaired");
+    assert_eq!(report["repositories"][1]["status"], "failed");
+    assert!(!fixture.workspace("partial-rename").exists());
+    assert!(fixture.workspace("resumed-rename").join("alpha").exists());
+    assert!(fixture.workspace("resumed-rename").join("beta").exists());
+
+    let resumed = forest(
+        &fixture.root,
+        &["rename", "partial-rename", "resumed-rename", "--json"],
+    );
+
+    assert_success(&resumed);
+    let report: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(report["status"], "renamed");
+    assert_eq!(report["repositories"][0]["status"], "already_repaired");
+    assert_eq!(report["repositories"][1]["status"], "repaired");
+    for name in ["alpha", "beta"] {
+        let worktrees = git_stdout(
+            &fixture.canonical(name),
+            &["worktree", "list", "--porcelain"],
+        );
+        assert!(worktrees.contains(path(&fixture.workspace("resumed-rename").join(name))));
+        assert!(!worktrees.contains(path(&fixture.workspace("partial-rename").join(name))));
+    }
+}
+
+#[test]
 fn force_archives_workspace_with_dirty_worktrees() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
@@ -3206,6 +3444,18 @@ fn dynamically_completes_workspaces_for_attach() {
 }
 
 #[test]
+fn dynamically_completes_the_source_workspace_for_rename() {
+    let fixture = WorkspaceFixture::new();
+    fs::create_dir_all(fixture.workspace("rename-source")).unwrap();
+    fs::create_dir_all(fixture.workspace("other-topic")).unwrap();
+
+    let candidates = completions(&fixture.root, &["git-forest", "rename", "rename"]);
+
+    assert!(candidates.contains(&"rename-source".to_owned()));
+    assert!(!candidates.contains(&"other-topic".to_owned()));
+}
+
+#[test]
 fn dynamically_completes_only_active_workspaces_for_archive() {
     let fixture = WorkspaceFixture::new();
     fs::create_dir_all(fixture.workspace("active-topic")).unwrap();
@@ -3283,6 +3533,8 @@ fn dynamically_completes_stale_registered_worktrees_for_remove() {
     fs::remove_dir(&workspace).unwrap();
     let workspaces = completions(&fixture.root, &["git-forest", "remove", "sta"]);
     assert!(workspaces.contains(&"stale-completion".to_owned()));
+    let rename_sources = completions(&fixture.root, &["git-forest", "rename", "sta"]);
+    assert!(rename_sources.contains(&"stale-completion".to_owned()));
 }
 
 #[test]

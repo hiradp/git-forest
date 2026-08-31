@@ -125,6 +125,20 @@ Print the absolute path of an existing workspace.
 .BI attach " workspace"
 Open an existing workspace in a running Herdr session.
 .TP
+.BI rename " workspace new-workspace"
+Rename an active workspace without changing its branches or working tree
+contents.
+Forest preflights the complete workspace, atomically moves its directory, and
+uses
+.B git worktree repair
+to update worktree metadata in each canonical repository.
+Dirty files and workspace-local entries are preserved.
+An inconsistent source, active destination, or archive using the new name
+prevents the rename.
+If Git repair fails after the directory moves, repeating the same command
+resumes the incomplete repair.
+Forest does not update Herdr runtime metadata.
+.TP
 .BI archive " workspace"
 Remove every clean registered worktree in a workspace, preserve its branches,
 and move its workspace-local entries to

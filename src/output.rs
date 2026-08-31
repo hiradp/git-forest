@@ -4,9 +4,10 @@ use serde::Serialize;
 
 use crate::domain::{
     ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CommandReport, FetchStatus,
-    RemovalStatus, RepositoriesFetchReport, RepositoriesReport, RepositoriesSetupReport,
-    RepositoriesUpdateReport, RepositoryRemoval, SetupStatus, UpdateStatus, WorkspaceArchiveReport,
-    WorkspaceAttachReport, WorkspaceChangeReport, WorkspaceListEntry, WorkspaceRemovalReport,
+    RemovalStatus, RenameStatus, RepositoriesFetchReport, RepositoriesReport,
+    RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval, SetupStatus,
+    UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport, WorkspaceChangeReport,
+    WorkspaceListEntry, WorkspaceRemovalReport, WorkspaceRenameReport, WorkspaceRenameStatus,
     WorkspaceStatusEntry,
 };
 use crate::error::{AppError, Result};
@@ -112,6 +113,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacePath(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
+            CommandReport::WorkspaceRename(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceArchive(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRemoval(report) => render_json(&mut writer, report)?,
         }
@@ -174,6 +176,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         }
         CommandReport::WorkspaceAttach(report) => {
             render_workspace_attach(&mut writer, report, styles)
+        }
+        CommandReport::WorkspaceRename(report) => {
+            render_workspace_rename(&mut writer, report, styles)
         }
         CommandReport::WorkspaceArchive(report) => {
             render_workspace_archive(&mut writer, report, styles)
@@ -747,6 +752,63 @@ fn render_workspace_attach(
             tab.path.display(),
         )
         .map_err(AppError::WriteOutput)?;
+    }
+    Ok(())
+}
+
+fn render_workspace_rename(
+    writer: &mut impl Write,
+    report: &WorkspaceRenameReport,
+    styles: Styles,
+) -> Result<()> {
+    render_header_field(writer, "From", &report.old_workspace, styles.bold(), styles)?;
+    render_header_field(writer, "Old path", report.old_path.display(), "", styles)?;
+    render_header_field(writer, "To", &report.workspace, styles.bold(), styles)?;
+    render_header_field(writer, "Path", report.path.display(), "", styles)?;
+    writeln!(writer).map_err(AppError::WriteOutput)?;
+
+    let name_width = report
+        .repositories
+        .iter()
+        .map(|repository| repository.checkout.chars().count())
+        .max()
+        .unwrap_or(0);
+    for repository in &report.repositories {
+        let (status, symbol, color) = match repository.status {
+            RenameStatus::Repaired => ("repaired", "✓", styles.green()),
+            RenameStatus::AlreadyRepaired => ("already repaired", "✓", styles.green()),
+            RenameStatus::Failed => ("failed", "✗", styles.red()),
+            RenameStatus::NotRun => ("not run", "–", styles.yellow()),
+        };
+        write!(
+            writer,
+            "  {color}{symbol}{} {}{:name_width$}{}  {color}{status}{}",
+            styles.reset(),
+            styles.bold(),
+            repository.checkout,
+            styles.reset(),
+            styles.reset(),
+        )
+        .map_err(AppError::WriteOutput)?;
+        if let Some(branch) = &repository.branch {
+            write!(writer, "  {}{branch}{}", styles.cyan(), styles.reset())
+                .map_err(AppError::WriteOutput)?;
+        }
+        writeln!(writer).map_err(AppError::WriteOutput)?;
+        if let Some(message) = &repository.message {
+            render_message(writer, message, styles)?;
+        }
+    }
+
+    let (symbol, color, summary) = match report.status {
+        WorkspaceRenameStatus::Renamed => ("✓", styles.green(), "Workspace renamed."),
+        WorkspaceRenameStatus::Conflict => ("✗", styles.red(), "Workspace was not renamed."),
+        WorkspaceRenameStatus::Failed => ("✗", styles.red(), "Workspace rename failed."),
+    };
+    writeln!(writer, "\n  {color}{symbol}{} {summary}", styles.reset())
+        .map_err(AppError::WriteOutput)?;
+    if let Some(message) = &report.message {
+        render_message(writer, message, styles)?;
     }
     Ok(())
 }

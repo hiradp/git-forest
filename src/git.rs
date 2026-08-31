@@ -519,6 +519,17 @@ impl Git {
         self.run(repository, ["update-ref", local_ref, new_oid, old_oid])
     }
 
+    pub fn repair_worktree(&self, repository: &Path, worktree: &Path) -> Result<Output> {
+        self.run(
+            repository,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("repair"),
+                worktree.as_os_str(),
+            ],
+        )
+    }
+
     pub fn remove_worktree(
         &self,
         repository: &Path,

@@ -58,7 +58,7 @@ pub fn workspaces(current: &OsStr) -> Vec<CompletionCandidate> {
     };
 
     let mut names = workspace_directories(&config);
-    if matches!(line.subcommand(), Some("remove" | "status"))
+    if matches!(line.subcommand(), Some("remove" | "rename" | "status"))
         && let Ok(states) = workspace::scan(&config, &Git)
     {
         names.extend(states.into_iter().map(|state| state.name));
@@ -237,6 +237,7 @@ impl CompletionLine {
                     | "status"
                     | "path"
                     | "attach"
+                    | "rename"
                     | "archive"
                     | "remove"
                     | "completions"
