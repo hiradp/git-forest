@@ -277,6 +277,29 @@ pub enum ArchiveStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WorktreesCleanReport {
+    pub worktrees: Vec<StaleWorktreeReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StaleWorktreeReport {
+    pub workspace: String,
+    pub name: String,
+    pub checkout: String,
+    pub slot: Option<String>,
+    pub path: PathBuf,
+    pub status: CleanStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanStatus {
+    Removed,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorkspaceRemovalReport {
     pub workspace: String,
     pub path: PathBuf,
@@ -333,5 +356,6 @@ pub enum CommandReport {
     WorkspaceAttach(WorkspaceAttachReport),
     WorkspaceRename(WorkspaceRenameReport),
     WorkspaceArchive(WorkspaceArchiveReport),
+    WorktreesClean(WorktreesCleanReport),
     WorkspaceRemoval(WorkspaceRemovalReport),
 }

@@ -158,6 +158,7 @@ git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
+git forest clean [--json]
 git forest remove <workspace> [<checkout>...] [--force] [--json]
 git forest completions <shell>
 ```
@@ -458,7 +459,7 @@ Passing `--force` removes dirty worktrees anyway, discarding their modified,
 untracked, and ignored files; all other conflicts still prevent archival.
 Workspace-local entries do not. A Git failure can leave a partially removed
 active workspace, and repeating the command safely resumes. Forest serializes
-its `create`, `add`, `rename`, `remove`, and `archive` mutations for a
+its `create`, `add`, `rename`, `archive`, `clean`, and `remove` mutations for a
 configuration so they cannot race one another. Repeating a successful archive
 reports `already_archived`. Archived workspaces are excluded
 from `list`, the interactive launcher, active workspace completion, and `path`.
@@ -469,6 +470,27 @@ An archived name cannot be reused by `create` or `add` while its archive
 destination exists. Forest does not record a manifest of removed checkouts; to
 resume manually, move the archived directory back to its original workspace
 path and use `add` for the desired checkouts.
+
+### `clean`
+
+Removes stale Git registrations left behind when Forest worktree directories
+have already been deleted outside Forest:
+
+```sh
+git forest clean
+```
+
+Use `remove` or `archive` for normal workspace retirement so Forest can reject
+dirty worktrees; `clean` only reconciles registrations after files are already
+missing and cannot recover deleted contents.
+
+Forest scans every configured canonical repository and runs
+`git worktree remove` for registered worktrees beneath the active workspace
+root whose paths no longer exist. It preserves branches, ignores present
+worktrees, and does not touch stale registrations outside the configured
+workspace root or beneath `.archive`. The command attempts every stale
+registration and exits unsuccessfully if any removal fails. Repeating it is
+safe; when nothing needs cleaning, it succeeds with an empty report.
 
 ### `remove`
 
@@ -748,6 +770,26 @@ status is `repaired`, `already_repaired`, `failed`, or `not_run`.
 
 Archive status is `archived`, `already_archived`, `conflict`, or `failed`.
 Repository removal statuses have the same meanings as for `remove`.
+
+### Clean
+
+```json
+{
+  "worktrees": [
+    {
+      "workspace": "logical-slots",
+      "name": "api",
+      "checkout": "api",
+      "slot": null,
+      "path": "/project/src/.workspaces/logical-slots/api",
+      "status": "removed",
+      "message": null
+    }
+  ]
+}
+```
+
+Clean status is `removed` or `failed`.
 
 ### Remove
 

@@ -3,12 +3,12 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::domain::{
-    ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CommandReport, FetchStatus,
-    RemovalStatus, RenameStatus, RepositoriesFetchReport, RepositoriesReport,
+    ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CleanStatus, CommandReport,
+    FetchStatus, RemovalStatus, RenameStatus, RepositoriesFetchReport, RepositoriesReport,
     RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval, SetupStatus,
     UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport, WorkspaceChangeReport,
     WorkspaceListEntry, WorkspaceRemovalReport, WorkspaceRenameReport, WorkspaceRenameStatus,
-    WorkspaceStatusEntry,
+    WorkspaceStatusEntry, WorktreesCleanReport,
 };
 use crate::error::{AppError, Result};
 
@@ -115,6 +115,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRename(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceArchive(report) => render_json(&mut writer, report)?,
+            CommandReport::WorktreesClean(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRemoval(report) => render_json(&mut writer, report)?,
         }
         writeln!(writer).map_err(AppError::WriteOutput)?;
@@ -182,6 +183,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         }
         CommandReport::WorkspaceArchive(report) => {
             render_workspace_archive(&mut writer, report, styles)
+        }
+        CommandReport::WorktreesClean(report) => {
+            render_worktrees_clean(&mut writer, report, styles)
         }
         CommandReport::WorkspaceRemoval(report) => {
             render_workspace_removal(&mut writer, report, styles)
@@ -847,6 +851,66 @@ fn render_workspace_archive(
             .map_err(AppError::WriteOutput)?;
         for entry in &report.preserved_entries {
             writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_worktrees_clean(
+    writer: &mut impl Write,
+    report: &WorktreesCleanReport,
+    styles: Styles,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{}Clean stale worktrees{}",
+        styles.bold(),
+        styles.reset()
+    )
+    .map_err(AppError::WriteOutput)?;
+    if report.worktrees.is_empty() {
+        return writeln!(
+            writer,
+            "\n  {}No stale worktree registrations found.{}",
+            styles.dim(),
+            styles.reset()
+        )
+        .map_err(AppError::WriteOutput);
+    }
+
+    writeln!(writer).map_err(AppError::WriteOutput)?;
+    let workspace_width = report
+        .worktrees
+        .iter()
+        .map(|worktree| worktree.workspace.chars().count())
+        .max()
+        .unwrap_or(0);
+    let checkout_width = report
+        .worktrees
+        .iter()
+        .map(|worktree| worktree.checkout.chars().count())
+        .max()
+        .unwrap_or(0);
+    for worktree in &report.worktrees {
+        let (status, symbol, color) = match worktree.status {
+            CleanStatus::Removed => ("removed", "✓", styles.green()),
+            CleanStatus::Failed => ("failed", "✗", styles.red()),
+        };
+        writeln!(
+            writer,
+            "  {color}{symbol}{} {}{:workspace_width$}{}  {}{:checkout_width$}{}  {color}{status}{}",
+            styles.reset(),
+            styles.bold(),
+            worktree.workspace,
+            styles.reset(),
+            styles.bold(),
+            worktree.checkout,
+            styles.reset(),
+            styles.reset(),
+        )
+        .map_err(AppError::WriteOutput)?;
+        if let Some(message) = &worktree.message {
+            render_message(writer, message, styles)?;
         }
     }
     Ok(())

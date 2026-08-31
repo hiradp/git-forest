@@ -71,6 +71,9 @@ pub enum Command {
     /// Retire a workspace while preserving workspace-local entries
     Archive(ArchiveArgs),
 
+    /// Remove stale registrations for manually deleted worktrees
+    Clean(OutputArgs),
+
     /// Remove worktrees from a workspace
     Remove(RemoveArgs),
 
@@ -92,6 +95,7 @@ impl Command {
             Self::Attach(args) => args.output.json,
             Self::Rename(args) => args.output.json,
             Self::Archive(args) => args.output.json,
+            Self::Clean(args) => args.json,
             Self::Remove(args) => args.output.json,
             Self::Completions(_) => false,
         }

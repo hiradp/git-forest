@@ -149,12 +149,25 @@ after partial execution.
 Repeating a successful archive reports it as already archived.
 Archived workspaces are excluded from the active workspace list and launcher.
 .TP
+.B clean
+Remove stale Git registrations for manually deleted Forest worktrees.
+Forest uses
+.B git worktree remove
+for registrations beneath the active workspace root whose paths no longer
+exist.
+It preserves branches, ignores present worktrees, and does not affect stale
+registrations outside the configured workspace root or beneath
+.BR .archive .
+The command is safe to repeat.
+.TP
 .BI remove " workspace [checkout ...]"
 Remove all worktrees in a workspace or only the named checkouts.
 Removal rejects dirty or unregistered paths, uses
 .B git worktree remove
 for present worktrees and stale registrations whose paths are already missing,
-preserves branches, and has no force option.
+preserves branches, and requires
+.B \-\-force
+before discarding modified, untracked, or ignored files.
 .TP
 .BI completions " shell"
 Generate dynamic shell completion setup for

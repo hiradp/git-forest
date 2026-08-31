@@ -1,5 +1,6 @@
 mod archive;
 mod attach;
+mod clean;
 mod create;
 mod fetch;
 mod list;
@@ -43,6 +44,7 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
         Command::Attach(arguments) => attach::run(config, git, herdr, arguments),
         Command::Rename(arguments) => rename::run(config, git, arguments),
         Command::Archive(arguments) => archive::run(config, git, arguments),
+        Command::Clean(_) => clean::run(config, git),
         Command::Remove(arguments) => remove::run(config, git, arguments),
     }
 }

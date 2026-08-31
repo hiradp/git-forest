@@ -2771,6 +2771,113 @@ fn force_archives_workspace_with_dirty_worktrees() {
 }
 
 #[test]
+fn cleans_registrations_for_manually_deleted_workspaces() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "deleted-one", "alpha", "beta", "--json"],
+    ));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "deleted-two", "alpha@part-2", "gamma", "--json"],
+    ));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "healthy", "gamma", "--json"],
+    ));
+    fs::remove_dir_all(fixture.workspace("deleted-one")).unwrap();
+    fs::remove_dir_all(fixture.workspace("deleted-two")).unwrap();
+
+    let output = forest(&fixture.root, &["clean", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let worktrees = report["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees.len(), 4);
+    assert_eq!(worktrees[0]["workspace"], "deleted-one");
+    assert_eq!(worktrees[0]["checkout"], "alpha");
+    assert_eq!(worktrees[0]["slot"], Value::Null);
+    assert_eq!(worktrees[0]["status"], "removed");
+    assert_eq!(worktrees[1]["workspace"], "deleted-one");
+    assert_eq!(worktrees[1]["checkout"], "beta");
+    assert_eq!(worktrees[2]["workspace"], "deleted-two");
+    assert_eq!(worktrees[2]["checkout"], "alpha@part-2");
+    assert_eq!(worktrees[2]["slot"], "part-2");
+    assert_eq!(worktrees[3]["checkout"], "gamma");
+    assert!(
+        worktrees
+            .iter()
+            .all(|worktree| worktree["status"] == "removed" && worktree["message"].is_null())
+    );
+
+    for (repository, workspace) in [
+        ("alpha", "deleted-one"),
+        ("beta", "deleted-one"),
+        ("alpha", "deleted-two"),
+        ("gamma", "deleted-two"),
+    ] {
+        let registrations = git_stdout(
+            &fixture.canonical(repository),
+            &["worktree", "list", "--porcelain"],
+        );
+        assert!(!registrations.contains(path(&fixture.workspace(workspace))));
+    }
+    assert!(fixture.workspace("healthy").join("gamma").exists());
+    for (repository, branch) in [
+        ("alpha", "test/deleted-one"),
+        ("beta", "test/deleted-one"),
+        ("alpha", "test/part-2"),
+        ("gamma", "test/deleted-two"),
+    ] {
+        git(
+            &fixture.canonical(repository),
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+    }
+
+    let repeated = forest(&fixture.root, &["clean", "--json"]);
+    assert_success(&repeated);
+    let report: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert!(report["worktrees"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn clean_does_not_touch_stale_worktrees_outside_the_workspace_root() {
+    let fixture = WorkspaceFixture::new();
+    let external = fixture.root.join("external-alpha");
+    git(
+        &fixture.canonical("alpha"),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "test/external",
+            path(&external),
+            "main",
+        ],
+    );
+    fs::remove_dir_all(&external).unwrap();
+
+    let output = forest(&fixture.root, &["clean", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["worktrees"].as_array().unwrap().is_empty());
+    assert!(
+        git_stdout(
+            &fixture.canonical("alpha"),
+            &["worktree", "list", "--porcelain"]
+        )
+        .contains(path(&external))
+    );
+}
+
+#[test]
 fn removes_stale_named_checkout_registration() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
