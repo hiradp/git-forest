@@ -3093,6 +3093,142 @@ fn archives_all_worktrees_and_preserves_workspace_entries() {
 }
 
 #[test]
+fn deletes_workspace_files_and_worktrees_but_preserves_branches() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "deleted", "alpha", "beta", "--json"],
+    ));
+    let workspace = fixture.workspace("deleted");
+    fs::write(workspace.join("notes.md"), "delete me\n").unwrap();
+    fs::create_dir(workspace.join("fixtures")).unwrap();
+    fs::write(workspace.join("fixtures/input.txt"), "delete me too\n").unwrap();
+
+    let output = forest(&fixture.root, &["delete", "deleted", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "deleted");
+    assert_eq!(report["repositories"].as_array().unwrap().len(), 2);
+    assert_eq!(report["deleted_entries"].as_array().unwrap().len(), 2);
+    assert!(!workspace.exists());
+    assert!(!fixture.archived_workspace("deleted").exists());
+    for repository in ["alpha", "beta"] {
+        assert!(
+            Command::new("git")
+                .current_dir(fixture.canonical(repository))
+                .args(["show-ref", "--verify", "--quiet", "refs/heads/test/deleted",])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    let repeated = forest(&fixture.root, &["delete", "deleted", "--json"]);
+    assert_success(&repeated);
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(repeated["status"], "already_deleted");
+}
+
+#[test]
+fn deletes_an_already_archived_workspace() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "archived-delete", "alpha", "--json"],
+    ));
+    fs::write(
+        fixture.workspace("archived-delete").join("notes.md"),
+        "delete me\n",
+    )
+    .unwrap();
+    assert_success(&forest(
+        &fixture.root,
+        &["archive", "archived-delete", "--json"],
+    ));
+
+    let output = forest(&fixture.root, &["delete", "archived-delete", "--json"]);
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "deleted");
+    assert!(!fixture.archived_workspace("archived-delete").exists());
+}
+
+#[test]
+fn dirty_worktree_blocks_deletion_before_local_files_are_deleted() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "dirty-delete", "alpha", "beta", "--json"],
+    ));
+    let workspace = fixture.workspace("dirty-delete");
+    fs::write(workspace.join("alpha/untracked.txt"), "dirty\n").unwrap();
+    fs::write(workspace.join("notes.md"), "keep\n").unwrap();
+
+    let output = forest(&fixture.root, &["delete", "dirty-delete", "--json"]);
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(workspace.join("alpha/untracked.txt").exists());
+    assert!(workspace.join("beta").exists());
+    assert!(workspace.join("notes.md").exists());
+    assert!(!fixture.archived_workspace("dirty-delete").exists());
+}
+
+#[test]
+fn force_delete_still_rejects_unregistered_checkout_paths() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "unregistered-delete", "alpha", "--json"],
+    ));
+    let unregistered = fixture.workspace("unregistered-delete").join("beta");
+    fs::create_dir(&unregistered).unwrap();
+    fs::write(unregistered.join("keep.txt"), "keep\n").unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["delete", "unregistered-delete", "--force", "--json"],
+    );
+
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "conflict");
+    assert!(
+        fixture
+            .workspace("unregistered-delete")
+            .join("alpha")
+            .exists()
+    );
+    assert!(unregistered.join("keep.txt").exists());
+}
+
+#[test]
+fn force_deletes_dirty_worktrees_and_workspace_files() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "force-delete", "alpha", "--json"],
+    ));
+    let workspace = fixture.workspace("force-delete");
+    fs::write(workspace.join("alpha/untracked.txt"), "dirty\n").unwrap();
+    fs::write(workspace.join("notes.md"), "delete\n").unwrap();
+
+    let output = forest(
+        &fixture.root,
+        &["delete", "force-delete", "--force", "--json"],
+    );
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "deleted");
+    assert!(!workspace.exists());
+    assert!(!fixture.archived_workspace("force-delete").exists());
+}
+
+#[test]
 fn dirty_worktree_blocks_archival_before_any_removal() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
@@ -3563,16 +3699,18 @@ fn dynamically_completes_the_source_workspace_for_rename() {
 }
 
 #[test]
-fn dynamically_completes_only_active_workspaces_for_archive() {
+fn dynamically_completes_only_active_workspaces_for_archive_and_delete() {
     let fixture = WorkspaceFixture::new();
     fs::create_dir_all(fixture.workspace("active-topic")).unwrap();
     fs::create_dir_all(fixture.archived_workspace("archived-topic")).unwrap();
 
-    let active = completions(&fixture.root, &["git-forest", "archive", "active"]);
-    let archived = completions(&fixture.root, &["git-forest", "archive", "archived"]);
+    for command in ["archive", "delete"] {
+        let active = completions(&fixture.root, &["git-forest", command, "active"]);
+        let archived = completions(&fixture.root, &["git-forest", command, "archived"]);
 
-    assert!(active.contains(&"active-topic".to_owned()));
-    assert!(!archived.contains(&"archived-topic".to_owned()));
+        assert!(active.contains(&"active-topic".to_owned()));
+        assert!(!archived.contains(&"archived-topic".to_owned()));
+    }
 }
 
 #[test]

@@ -239,6 +239,7 @@ impl CompletionLine {
                     | "attach"
                     | "rename"
                     | "archive"
+                    | "delete"
                     | "clean"
                     | "remove"
                     | "completions"

@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 
-use crate::cli::{AttachArgs, Cli, Command, CreateArgs, OutputArgs};
+use crate::cli::{ArchiveArgs, AttachArgs, Cli, Command, CreateArgs, DeleteArgs, OutputArgs};
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use crate::git::Git;
@@ -130,7 +130,40 @@ fn run_launcher(config: &Config) -> Result<u8> {
                 ))
             })
         }
+        launcher::Outcome::Action(launcher::Action::Archive { workspaces, force }) => {
+            execute_many(config, workspaces, |workspace| {
+                Command::Archive(ArchiveArgs {
+                    workspace,
+                    force,
+                    output: OutputArgs { json: false },
+                })
+            })
+        }
+        launcher::Outcome::Action(launcher::Action::Delete { workspaces, force }) => {
+            execute_many(config, workspaces, |workspace| {
+                Command::Delete(DeleteArgs {
+                    workspace,
+                    force,
+                    output: OutputArgs { json: false },
+                })
+            })
+        }
     }
+}
+
+fn execute_many(
+    config: &Config,
+    workspaces: Vec<String>,
+    command: impl Fn(String) -> Command,
+) -> Result<u8> {
+    let mut exit_code = 0;
+    for (index, workspace) in workspaces.into_iter().enumerate() {
+        if index > 0 {
+            output::render_blank_line()?;
+        }
+        exit_code = exit_code.max(execute(&command(workspace), config)?);
+    }
+    Ok(exit_code)
 }
 
 fn execute(command: &Command, config: &Config) -> Result<u8> {

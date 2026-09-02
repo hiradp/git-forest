@@ -16,6 +16,14 @@ use super::remove;
 
 pub fn run(config: &Config, git: &Git, arguments: &ArchiveArgs) -> Result<CommandOutcome> {
     let _lock = workspace::lock_mutations(config)?;
+    run_locked(config, git, arguments)
+}
+
+pub(crate) fn run_locked(
+    config: &Config,
+    git: &Git,
+    arguments: &ArchiveArgs,
+) -> Result<CommandOutcome> {
     let workspace_path = config.workspace_path(&arguments.workspace)?;
     let archive_path = config.archive_path(&arguments.workspace)?;
     let workspace_metadata = path_metadata(&workspace_path)?;

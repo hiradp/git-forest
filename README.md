@@ -158,6 +158,7 @@ git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
+git forest delete <workspace> [--force] [--json]
 git forest clean [--json]
 git forest remove <workspace> [<checkout>...] [--force] [--json]
 git forest completions <shell>
@@ -182,10 +183,10 @@ enter to attach the selected workspace in Herdr.
   Pick a workspace. We’ll get it ready.
 
 ◆ Where do you want to work?
-› +  Create a new workspace
-  logical-slots  api · operator
-  review-123     api
-[type to search · ↑↓ to move · enter to open · esc to leave]
+›   +  Create a new workspace
+  ○ logical-slots  api · operator
+  ● review-123     api
+[search · ↑↓ move · space select · enter open · ctrl+d/del actions · esc leave]
 ```
 
 The first picker also offers **Create a new workspace**. Forest prompts for a
@@ -197,7 +198,14 @@ local `origin/HEAD`; use the
 non-interactive `create` and `add` commands for named checkouts or branch and
 base overrides.
 
-Press escape at any prompt to leave without making changes. The launcher honors
+Press Space to select any number of existing workspaces, then Ctrl+D or Delete
+to choose Archive, Force archive, Delete, or Force delete for the selection. If
+nothing is selected, the action applies only to the highlighted workspace. A
+single confirmation covers the full selection. Archive moves workspace-local
+files beneath `.archive`; Delete permanently removes them.
+Non-force actions refuse dirty worktrees, while force actions explicitly discard
+dirty worktree changes. All four actions preserve Git branches. Press escape at
+any prompt to go back or leave without making changes. The launcher honors
 `NO_COLOR`. Without an interactive terminal, invoking Forest without a
 subcommand prints help instead of waiting for input.
 
@@ -470,6 +478,17 @@ An archived name cannot be reused by `create` or `add` while its archive
 destination exists. Forest does not record a manifest of removed checkouts; to
 resume manually, move the archived directory back to its original workspace
 path and use `add` for the desired checkouts.
+
+### `delete`
+
+Permanently deletes a workspace. Forest first applies the same complete-workspace
+preflight and worktree removal as `archive`, preserving branches and refusing
+dirty or unregistered worktrees. It then permanently removes workspace-local
+files instead of retaining them beneath `.archive`. Pass `--force` to explicitly
+discard modified, untracked, or ignored files in registered worktrees as well.
+Force never deletes branches and does not bypass unregistered-path checks.
+Deletion is safe to repeat; a workspace with no active or archived path and no
+remaining Git worktree registrations is reported as already deleted.
 
 ### `clean`
 
@@ -769,6 +788,34 @@ status is `repaired`, `already_repaired`, `failed`, or `not_run`.
 ```
 
 Archive status is `archived`, `already_archived`, `conflict`, or `failed`.
+Repository removal statuses have the same meanings as for `remove`.
+
+### Delete
+
+```json
+{
+  "workspace": "logical-slots",
+  "path": "/project/src/.workspaces/logical-slots",
+  "repositories": [
+    {
+      "name": "api",
+      "checkout": "api",
+      "slot": null,
+      "path": "/project/src/.workspaces/logical-slots/api",
+      "status": "removed",
+      "message": null
+    }
+  ],
+  "status": "deleted",
+  "deleted_entries": [
+    "/project/src/.workspaces/.archive/logical-slots/notes.md"
+  ],
+  "message": null
+}
+```
+
+Delete status is `deleted`, `already_deleted`, `conflict`, or `failed`.
+`deleted_entries` lists workspace-local paths removed by a successful deletion.
 Repository removal statuses have the same meanings as for `remove`.
 
 ### Clean

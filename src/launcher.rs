@@ -27,6 +27,14 @@ pub enum Action {
         workspace: String,
         checkouts: Vec<CheckoutId>,
     },
+    Archive {
+        workspaces: Vec<String>,
+        force: bool,
+    },
+    Delete {
+        workspaces: Vec<String>,
+        force: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -108,24 +116,48 @@ pub fn prompt(config: &Config, git: &Git) -> Result<Outcome> {
     );
 
     let mut terminal = PromptTerminal::new().map_err(AppError::Prompt)?;
-    let choice = match select(
-        &mut terminal,
-        "Where do you want to work?",
-        &choices,
-        "type to search · ↑↓ to move · enter to open · esc to leave",
-        |choice| choice.answer(),
-    )? {
-        PromptAnswer::Value(index) => choices[index].clone(),
-        PromptAnswer::Cancelled => return Ok(Outcome::Cancelled),
-        PromptAnswer::Interrupted => return Ok(Outcome::Interrupted),
-    };
+    let mut selected_workspaces = HashSet::new();
+    loop {
+        let choice = match select(
+            &mut terminal,
+            "Where do you want to work?",
+            &choices,
+            &mut selected_workspaces,
+            "search · ↑↓ move · space select · enter open · ctrl+d/del actions · esc leave",
+            |choice| choice.answer(),
+        )? {
+            PromptAnswer::Value(SelectionAction::Open(index)) => {
+                return match choices[index].clone() {
+                    WorkspaceChoice::Existing { name, issue, .. } => {
+                        Ok(Outcome::Action(Action::Attach {
+                            workspace: name,
+                            issue,
+                        }))
+                    }
+                    WorkspaceChoice::Create => {
+                        prompt_for_workspace(config, existing_names, &mut terminal)
+                    }
+                };
+            }
+            PromptAnswer::Value(SelectionAction::Manage(indices)) => indices
+                .into_iter()
+                .filter_map(|index| match &choices[index] {
+                    WorkspaceChoice::Existing { name, .. } => Some(name.clone()),
+                    WorkspaceChoice::Create => None,
+                })
+                .collect::<Vec<_>>(),
+            PromptAnswer::Cancelled => return Ok(Outcome::Cancelled),
+            PromptAnswer::Interrupted => return Ok(Outcome::Interrupted),
+        };
 
-    match choice {
-        WorkspaceChoice::Existing { name, issue, .. } => Ok(Outcome::Action(Action::Attach {
-            workspace: name,
-            issue,
-        })),
-        WorkspaceChoice::Create => prompt_for_workspace(config, existing_names, &mut terminal),
+        if choice.is_empty() {
+            continue;
+        }
+        match prompt_for_retirement(&mut terminal, &choice)? {
+            PromptAnswer::Value(action) => return Ok(Outcome::Action(action)),
+            PromptAnswer::Cancelled => {}
+            PromptAnswer::Interrupted => return Ok(Outcome::Interrupted),
+        }
     }
 }
 
@@ -228,13 +260,20 @@ enum PromptAnswer<T> {
     Interrupted,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SelectionAction {
+    Open(usize),
+    Manage(Vec<usize>),
+}
+
 fn select<T, F>(
     terminal: &mut PromptTerminal,
     message: &str,
     choices: &[T],
+    checked: &mut HashSet<usize>,
     help: &str,
     answer: F,
-) -> Result<PromptAnswer<usize>>
+) -> Result<PromptAnswer<SelectionAction>>
 where
     T: fmt::Display,
     F: for<'a> Fn(&'a T) -> &'a str,
@@ -249,7 +288,7 @@ where
         }
         terminal
             .render(&selection_lines(
-                message, choices, &filtered, selection, &query, help,
+                message, choices, &filtered, checked, selection, &query, help,
             ))
             .map_err(AppError::Prompt)?;
 
@@ -276,7 +315,25 @@ where
                 terminal
                     .finish(message, answer(&choices[index]), LineStyle::Green)
                     .map_err(AppError::Prompt)?;
-                return Ok(PromptAnswer::Value(index));
+                return Ok(PromptAnswer::Value(SelectionAction::Open(index)));
+            }
+            Event::Key(key) if workspace_action_requested(key) && !filtered.is_empty() => {
+                let indices = selected_action_indices(checked, &filtered, selection);
+                if !indices.is_empty() {
+                    return Ok(PromptAnswer::Value(SelectionAction::Manage(indices)));
+                }
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(' '),
+                ..
+            }) if !filtered.is_empty() && filtered[selection] > 0 => {
+                toggle_workspace_selection(
+                    checked,
+                    filtered[selection],
+                    choices.len(),
+                    &mut selection,
+                    &mut query,
+                );
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Up, ..
@@ -310,6 +367,193 @@ where
             }
             _ => {}
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RetirementChoice {
+    Archive,
+    ForceArchive,
+    Delete,
+    ForceDelete,
+}
+
+impl RetirementChoice {
+    const ALL: [Self; 4] = [
+        Self::Archive,
+        Self::ForceArchive,
+        Self::Delete,
+        Self::ForceDelete,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Archive => "Archive",
+            Self::ForceArchive => "Force archive",
+            Self::Delete => "Delete",
+            Self::ForceDelete => "Force delete",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Archive => "preserve local files; refuse dirty worktrees",
+            Self::ForceArchive => "preserve local files; discard dirty worktree changes",
+            Self::Delete => "permanently delete local files; refuse dirty worktrees",
+            Self::ForceDelete => "permanently delete local files and dirty worktree changes",
+        }
+    }
+
+    fn action(self, workspaces: Vec<String>) -> Action {
+        match self {
+            Self::Archive => Action::Archive {
+                workspaces,
+                force: false,
+            },
+            Self::ForceArchive => Action::Archive {
+                workspaces,
+                force: true,
+            },
+            Self::Delete => Action::Delete {
+                workspaces,
+                force: false,
+            },
+            Self::ForceDelete => Action::Delete {
+                workspaces,
+                force: true,
+            },
+        }
+    }
+}
+
+fn prompt_for_retirement(
+    terminal: &mut PromptTerminal,
+    workspaces: &[String],
+) -> Result<PromptAnswer<Action>> {
+    let mut selection = 0;
+    loop {
+        let mut lines = vec![DisplayLine::new(
+            format!(
+                "◆ What should Forest do with {}?",
+                workspace_summary(workspaces)
+            ),
+            LineStyle::Plain,
+        )];
+        lines.extend(
+            RetirementChoice::ALL
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| {
+                    DisplayLine::new(
+                        format!(
+                            "{} {:<13}  {}",
+                            if index == selection { "›" } else { " " },
+                            choice.label(),
+                            choice.description()
+                        ),
+                        if index == selection {
+                            LineStyle::CyanBold
+                        } else {
+                            LineStyle::Plain
+                        },
+                    )
+                }),
+        );
+        lines.push(DisplayLine::new(
+            "[↑↓ to move · enter to choose · esc to go back]",
+            LineStyle::Dim,
+        ));
+        terminal.render(&lines).map_err(AppError::Prompt)?;
+
+        match read_event().map_err(AppError::Prompt)? {
+            Event::Key(key) if interrupted(key) => {
+                terminal
+                    .finish("Workspace action", "<interrupted>", LineStyle::Dim)
+                    .map_err(AppError::Prompt)?;
+                return Ok(PromptAnswer::Interrupted);
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc, ..
+            }) => return Ok(PromptAnswer::Cancelled),
+            Event::Key(KeyEvent {
+                code: KeyCode::Up, ..
+            }) => selection = selection.saturating_sub(1),
+            Event::Key(KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }) => selection = (selection + 1).min(RetirementChoice::ALL.len() - 1),
+            Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            }) => {
+                let choice = RetirementChoice::ALL[selection];
+                return confirm_retirement(terminal, workspaces, choice);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn confirm_retirement(
+    terminal: &mut PromptTerminal,
+    workspaces: &[String],
+    choice: RetirementChoice,
+) -> Result<PromptAnswer<Action>> {
+    let message = format!(
+        "{} {}?",
+        choice.label(),
+        if workspaces.len() == 1 {
+            format!("workspace {:?}", workspaces[0])
+        } else {
+            format!("{} workspaces", workspaces.len())
+        }
+    );
+    loop {
+        terminal
+            .render(&[
+                DisplayLine::new(format!("◆ {message}"), LineStyle::Plain),
+                DisplayLine::new(format!("  {}", workspaces.join(" · ")), LineStyle::Plain),
+                DisplayLine::new(format!("  {}.", choice.description()), LineStyle::Dim),
+                DisplayLine::new("  Git branches are always preserved.", LineStyle::Dim),
+                DisplayLine::new("[y to confirm · n/esc to go back]", LineStyle::Dim),
+            ])
+            .map_err(AppError::Prompt)?;
+
+        match read_event().map_err(AppError::Prompt)? {
+            Event::Key(key) if interrupted(key) => {
+                terminal
+                    .finish(&message, "<interrupted>", LineStyle::Dim)
+                    .map_err(AppError::Prompt)?;
+                return Ok(PromptAnswer::Interrupted);
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('y' | 'Y'),
+                modifiers,
+                ..
+            }) if text_modifiers(modifiers) => {
+                terminal
+                    .finish(
+                        choice.label(),
+                        &workspace_summary(workspaces),
+                        LineStyle::Green,
+                    )
+                    .map_err(AppError::Prompt)?;
+                return Ok(PromptAnswer::Value(choice.action(workspaces.to_vec())));
+            }
+            Event::Key(KeyEvent {
+                code: KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'N'),
+                ..
+            }) => return Ok(PromptAnswer::Cancelled),
+            _ => {}
+        }
+    }
+}
+
+fn workspace_summary(workspaces: &[String]) -> String {
+    if workspaces.len() == 1 {
+        format!("workspace {:?}", workspaces[0])
+    } else {
+        format!("{} workspaces", workspaces.len())
     }
 }
 
@@ -549,6 +793,7 @@ fn selection_lines<T: fmt::Display>(
     message: &str,
     choices: &[T],
     filtered: &[usize],
+    checked: &HashSet<usize>,
     selection: usize,
     query: &str,
     help: &str,
@@ -564,7 +809,18 @@ fn selection_lines<T: fmt::Display>(
         for (position, index) in filtered.iter().enumerate().skip(start).take(PAGE_SIZE) {
             let selected = position == selection;
             lines.push(DisplayLine::new(
-                format!("{} {}", if selected { "›" } else { " " }, choices[*index]),
+                format!(
+                    "{} {} {}",
+                    if selected { "›" } else { " " },
+                    if *index == 0 {
+                        " "
+                    } else if checked.contains(index) {
+                        "●"
+                    } else {
+                        "○"
+                    },
+                    choices[*index]
+                ),
                 if selected {
                     LineStyle::CyanBold
                 } else {
@@ -657,6 +913,40 @@ fn page_start(selection: usize) -> usize {
 
 fn interrupted(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn workspace_action_requested(key: KeyEvent) -> bool {
+    key.code == KeyCode::Delete
+        || (key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn toggle_workspace_selection(
+    checked: &mut HashSet<usize>,
+    index: usize,
+    choice_count: usize,
+    selection: &mut usize,
+    query: &mut String,
+) {
+    if !checked.insert(index) {
+        checked.remove(&index);
+    }
+    query.clear();
+    *selection = (index + 1).min(choice_count.saturating_sub(1));
+}
+
+fn selected_action_indices(
+    checked: &HashSet<usize>,
+    filtered: &[usize],
+    selection: usize,
+) -> Vec<usize> {
+    if checked.is_empty() {
+        let index = filtered[selection];
+        return (index > 0).then_some(vec![index]).unwrap_or_default();
+    }
+
+    let mut indices = checked.iter().copied().collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices
 }
 
 fn text_modifiers(modifiers: KeyModifiers) -> bool {
@@ -851,6 +1141,98 @@ mod tests {
 
         assert_eq!(healthy.to_string(), "short     api · web");
         assert_eq!(unhealthy.to_string(), "broken    api  ! needs attention");
+    }
+
+    #[test]
+    fn workspace_action_shortcuts_require_an_explicit_action_key() {
+        assert!(workspace_action_requested(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE
+        )));
+        assert!(workspace_action_requested(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!workspace_action_requested(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE
+        )));
+        assert!(!workspace_action_requested(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn workspace_picker_marks_checked_existing_workspaces() {
+        let lines = selection_lines(
+            "Pick",
+            &["Create", "one", "two"],
+            &[0, 1, 2],
+            &HashSet::from([2]),
+            0,
+            "",
+            "help",
+        );
+
+        assert_eq!(lines[1].text, "›   Create");
+        assert_eq!(lines[2].text, "  ○ one");
+        assert_eq!(lines[3].text, "  ● two");
+    }
+
+    #[test]
+    fn selecting_a_workspace_clears_search_and_advances() {
+        let mut checked = HashSet::new();
+        let mut selection = 0;
+        let mut query = "one".to_owned();
+
+        toggle_workspace_selection(&mut checked, 1, 4, &mut selection, &mut query);
+
+        assert_eq!(checked, HashSet::from([1]));
+        assert_eq!(selection, 2);
+        assert!(query.is_empty());
+    }
+
+    #[test]
+    fn workspace_actions_use_all_checked_workspaces_or_the_highlighted_fallback() {
+        assert_eq!(
+            selected_action_indices(&HashSet::from([3, 1]), &[0, 1, 2, 3], 0),
+            [1, 3]
+        );
+        assert_eq!(selected_action_indices(&HashSet::new(), &[2], 0), [2]);
+        assert!(selected_action_indices(&HashSet::new(), &[0], 0).is_empty());
+    }
+
+    #[test]
+    fn retirement_choices_keep_force_explicit() {
+        for (choice, archive, force) in [
+            (RetirementChoice::Archive, true, false),
+            (RetirementChoice::ForceArchive, true, true),
+            (RetirementChoice::Delete, false, false),
+            (RetirementChoice::ForceDelete, false, true),
+        ] {
+            match choice.action(vec!["topic".to_owned(), "other".to_owned()]) {
+                Action::Archive {
+                    workspaces,
+                    force: actual_force,
+                } => {
+                    assert!(archive);
+                    assert_eq!(workspaces, ["topic", "other"]);
+                    assert_eq!(actual_force, force);
+                }
+                Action::Delete {
+                    workspaces,
+                    force: actual_force,
+                } => {
+                    assert!(!archive);
+                    assert_eq!(workspaces, ["topic", "other"]);
+                    assert_eq!(actual_force, force);
+                }
+                Action::Attach { .. } | Action::Create { .. } => {
+                    panic!("retirement choice produced a non-retirement action")
+                }
+            }
+        }
     }
 
     #[test]

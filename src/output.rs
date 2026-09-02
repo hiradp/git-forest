@@ -4,11 +4,11 @@ use serde::Serialize;
 
 use crate::domain::{
     ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CleanStatus, CommandReport,
-    FetchStatus, RemovalStatus, RenameStatus, RepositoriesFetchReport, RepositoriesReport,
-    RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval, SetupStatus,
-    UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport, WorkspaceChangeReport,
-    WorkspaceListEntry, WorkspaceRemovalReport, WorkspaceRenameReport, WorkspaceRenameStatus,
-    WorkspaceStatusEntry, WorktreesCleanReport,
+    DeleteStatus, FetchStatus, RemovalStatus, RenameStatus, RepositoriesFetchReport,
+    RepositoriesReport, RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval,
+    SetupStatus, UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport,
+    WorkspaceChangeReport, WorkspaceDeleteReport, WorkspaceListEntry, WorkspaceRemovalReport,
+    WorkspaceRenameReport, WorkspaceRenameStatus, WorkspaceStatusEntry, WorktreesCleanReport,
 };
 use crate::error::{AppError, Result};
 
@@ -115,6 +115,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRename(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceArchive(report) => render_json(&mut writer, report)?,
+            CommandReport::WorkspaceDelete(report) => render_json(&mut writer, report)?,
             CommandReport::WorktreesClean(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRemoval(report) => render_json(&mut writer, report)?,
         }
@@ -183,6 +184,9 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         }
         CommandReport::WorkspaceArchive(report) => {
             render_workspace_archive(&mut writer, report, styles)
+        }
+        CommandReport::WorkspaceDelete(report) => {
+            render_workspace_delete(&mut writer, report, styles)
         }
         CommandReport::WorktreesClean(report) => {
             render_worktrees_clean(&mut writer, report, styles)
@@ -850,6 +854,41 @@ fn render_workspace_archive(
         writeln!(writer, "\n{}Preserved{}", styles.bold(), styles.reset())
             .map_err(AppError::WriteOutput)?;
         for entry in &report.preserved_entries {
+            writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_workspace_delete(
+    writer: &mut impl Write,
+    report: &WorkspaceDeleteReport,
+    styles: Styles,
+) -> Result<()> {
+    render_workspace_header(
+        writer,
+        &report.workspace,
+        report.path.display(),
+        None,
+        styles,
+    )?;
+    render_repository_removals(writer, &report.repositories, styles)?;
+
+    let (symbol, color, summary) = match report.status {
+        DeleteStatus::Deleted => ("✓", styles.green(), "Workspace deleted."),
+        DeleteStatus::AlreadyDeleted => ("✓", styles.green(), "Workspace is already deleted."),
+        DeleteStatus::Conflict => ("✗", styles.red(), "Workspace was not deleted."),
+        DeleteStatus::Failed => ("✗", styles.red(), "Workspace deletion failed."),
+    };
+    writeln!(writer, "\n  {color}{symbol}{} {summary}", styles.reset())
+        .map_err(AppError::WriteOutput)?;
+    if let Some(message) = &report.message {
+        render_message(writer, message, styles)?;
+    }
+    if !report.deleted_entries.is_empty() {
+        writeln!(writer, "\n{}Deleted{}", styles.bold(), styles.reset())
+            .map_err(AppError::WriteOutput)?;
+        for entry in &report.deleted_entries {
             writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
         }
     }

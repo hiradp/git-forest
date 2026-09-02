@@ -277,6 +277,25 @@ pub enum ArchiveStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WorkspaceDeleteReport {
+    pub workspace: String,
+    pub path: PathBuf,
+    pub repositories: Vec<RepositoryRemoval>,
+    pub status: DeleteStatus,
+    pub deleted_entries: Vec<PathBuf>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteStatus {
+    Deleted,
+    AlreadyDeleted,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
 pub struct WorktreesCleanReport {
     pub worktrees: Vec<StaleWorktreeReport>,
 }
@@ -356,6 +375,7 @@ pub enum CommandReport {
     WorkspaceAttach(WorkspaceAttachReport),
     WorkspaceRename(WorkspaceRenameReport),
     WorkspaceArchive(WorkspaceArchiveReport),
+    WorkspaceDelete(WorkspaceDeleteReport),
     WorktreesClean(WorktreesCleanReport),
     WorkspaceRemoval(WorkspaceRemovalReport),
 }

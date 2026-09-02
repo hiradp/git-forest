@@ -59,6 +59,15 @@ This option is available on non-interactive commands.
 .TP
 .B open
 Search, create, and open workspaces interactively.
+Press Space to select one or more existing workspaces, then Ctrl-D or Delete to
+choose Archive, Force archive, Delete, or Force delete for the selection.
+With no selection, the action applies to the highlighted workspace.
+A single confirmation covers the full selection.
+Archive preserves workspace-local files beneath
+.BR .archive ;
+Delete permanently removes them.
+Non-force actions refuse dirty worktrees, force actions explicitly discard dirty
+worktree changes, and every action preserves Git branches.
 .TP
 .B setup
 Ensure configured canonical repositories are cloned.
@@ -148,6 +157,20 @@ conflict with an active workspace, never overwrites files, and is safe to repeat
 after partial execution.
 Repeating a successful archive reports it as already archived.
 Archived workspaces are excluded from the active workspace list and launcher.
+.TP
+.BI delete " workspace"
+Permanently delete a workspace while preserving its Git branches.
+Forest first applies the same complete-workspace preflight and worktree removal
+as
+.BR archive ,
+then permanently removes workspace-local files instead of retaining them beneath
+.BR .archive .
+Dirty or unregistered worktrees prevent deletion.
+Use
+.B \-\-force
+only to explicitly discard modified, untracked, or ignored files in registered
+worktrees; it does not delete branches or bypass unregistered-path checks.
+Deletion is safe to repeat.
 .TP
 .B clean
 Remove stale Git registrations for manually deleted Forest worktrees.

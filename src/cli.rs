@@ -71,6 +71,9 @@ pub enum Command {
     /// Retire a workspace while preserving workspace-local entries
     Archive(ArchiveArgs),
 
+    /// Permanently delete a workspace while preserving its branches
+    Delete(DeleteArgs),
+
     /// Remove stale registrations for manually deleted worktrees
     Clean(OutputArgs),
 
@@ -95,6 +98,7 @@ impl Command {
             Self::Attach(args) => args.output.json,
             Self::Rename(args) => args.output.json,
             Self::Archive(args) => args.output.json,
+            Self::Delete(args) => args.output.json,
             Self::Clean(args) => args.json,
             Self::Remove(args) => args.output.json,
             Self::Completions(_) => false,
@@ -301,6 +305,20 @@ pub struct ArchiveArgs {
     pub workspace: String,
 
     /// Remove worktrees even if they contain modified, untracked, or ignored files
+    #[arg(long)]
+    pub force: bool,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct DeleteArgs {
+    /// Workspace name
+    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
+    pub workspace: String,
+
+    /// Delete worktrees even if they contain modified, untracked, or ignored files
     #[arg(long)]
     pub force: bool,
 
