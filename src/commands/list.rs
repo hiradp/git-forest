@@ -40,6 +40,18 @@ pub fn run(config: &Config, git: &Git) -> Result<WorkspacesListReport> {
     Ok(WorkspacesListReport { workspaces })
 }
 
+pub fn archived(config: &Config) -> Result<crate::domain::ArchivesListReport> {
+    let archives = crate::archives::scan(config)?
+        .into_iter()
+        .map(|archive| crate::domain::ArchiveListEntry {
+            workspace: archive.workspace,
+            archive_id: archive.archive_id,
+            archive_path: archive.path,
+        })
+        .collect();
+    Ok(crate::domain::ArchivesListReport { archives })
+}
+
 fn short_branch(branch: Option<&str>) -> Option<String> {
     branch.map(|branch| {
         branch

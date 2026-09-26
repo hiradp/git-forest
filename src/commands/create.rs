@@ -104,10 +104,29 @@ fn path_occupied(path: &Path) -> Result<bool> {
         Ok(_) => Ok(true),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(AppError::Filesystem {
-            context: format!("could not inspect archive path {}", path.display()),
+            context: format!("could not inspect path {}", path.display()),
             source,
         }),
     }
+}
+
+pub(crate) struct CreationPlan {
+    workspace: String,
+    path: PathBuf,
+    plans: Vec<Plan>,
+}
+
+pub(crate) enum Preparation {
+    Ready(CreationPlan),
+    Conflict(CommandOutcome),
+}
+
+pub(crate) fn prepare_create(
+    config: &Config,
+    git: &Git,
+    arguments: &CreateArgs,
+) -> Result<Preparation> {
+    prepare(config, git, arguments.into(), false)
 }
 
 fn run(
@@ -116,17 +135,20 @@ fn run(
     arguments: Arguments<'_>,
     require_existing_workspace: bool,
 ) -> Result<CommandOutcome> {
-    let workspace_path = config.workspace_path(arguments.workspace)?;
-    let archive_path = config.archive_path(arguments.workspace)?;
-    let overrides = validate_arguments(config, arguments)?;
-
-    if path_occupied(&archive_path)? {
-        return Err(AppError::Operational(format!(
-            "workspace {:?} is archived at {}; move the archive before reusing its name",
-            arguments.workspace,
-            archive_path.display()
-        )));
+    match prepare(config, git, arguments, require_existing_workspace)? {
+        Preparation::Ready(plan) => apply(git, plan),
+        Preparation::Conflict(outcome) => Ok(outcome),
     }
+}
+
+fn prepare(
+    config: &Config,
+    git: &Git,
+    arguments: Arguments<'_>,
+    require_existing_workspace: bool,
+) -> Result<Preparation> {
+    let workspace_path = config.workspace_path(arguments.workspace)?;
+    let overrides = validate_arguments(config, arguments)?;
     if workspace_path.exists() && !workspace_path.is_dir() {
         return Err(AppError::Operational(format!(
             "workspace path {} exists and is not a directory",
@@ -194,14 +216,14 @@ fn run(
                 ),
             })
             .collect();
-        return Ok(CommandOutcome {
+        return Ok(Preparation::Conflict(CommandOutcome {
             report: CommandReport::WorkspaceChange(WorkspaceChangeReport {
                 workspace: arguments.workspace.to_owned(),
                 path: workspace_path,
                 repositories,
             }),
             exit_code: 1,
-        });
+        }));
     }
 
     let plans = preflight
@@ -211,6 +233,19 @@ fn run(
             Preflight::Conflict(_, _) => unreachable!("conflicts were handled above"),
         })
         .collect::<Vec<_>>();
+    Ok(Preparation::Ready(CreationPlan {
+        workspace: arguments.workspace.to_owned(),
+        path: workspace_path,
+        plans,
+    }))
+}
+
+pub(crate) fn apply(git: &Git, plan: CreationPlan) -> Result<CommandOutcome> {
+    let CreationPlan {
+        workspace,
+        path: workspace_path,
+        plans,
+    } = plan;
     if !workspace_path.is_dir()
         || plans
             .iter()
@@ -292,7 +327,7 @@ fn run(
 
     Ok(CommandOutcome {
         report: CommandReport::WorkspaceChange(WorkspaceChangeReport {
-            workspace: arguments.workspace.to_owned(),
+            workspace,
             path: workspace_path,
             repositories,
         }),

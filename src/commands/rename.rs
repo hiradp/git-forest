@@ -37,20 +37,6 @@ pub fn run(config: &Config, git: &Git, arguments: &RenameArgs) -> Result<Command
         ));
     }
 
-    let archive_path = config.archive_path(&arguments.new_workspace)?;
-    if path_metadata(&archive_path)?.is_some() {
-        return Ok(conflict(
-            arguments,
-            old_path,
-            path,
-            format!(
-                "workspace name {:?} is reserved by archive destination {}",
-                arguments.new_workspace,
-                archive_path.display()
-            ),
-        ));
-    }
-
     let old_metadata = path_metadata(&old_path)?;
     let new_metadata = path_metadata(&path)?;
     let states = workspace::scan(config, git)?;

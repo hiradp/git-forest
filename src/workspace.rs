@@ -329,19 +329,19 @@ fn paths_match(left: &Path, right: &Path) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
-fn path_is_within(path: &Path, root: &Path) -> bool {
-    if path.strip_prefix(root).is_ok() {
-        return true;
-    }
-    let Some(canonical_root) = root.canonicalize().ok() else {
-        return false;
-    };
-    if path.strip_prefix(&canonical_root).is_ok() {
-        return true;
-    }
-    path.canonicalize()
-        .ok()
-        .is_some_and(|path| path.strip_prefix(canonical_root).is_ok())
+pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
+        || resolve_existing_ancestor(path)
+            .zip(resolve_existing_ancestor(root))
+            .is_some_and(|(path, root)| path.starts_with(root))
+}
+
+fn resolve_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    // Git records resolved paths, even when a worktree has since been deleted.
+    path.ancestors().find_map(|ancestor| {
+        let resolved = ancestor.canonicalize().ok()?;
+        Some(resolved.join(path.strip_prefix(ancestor).ok()?))
+    })
 }
 
 fn path_occupied(path: &Path) -> Result<bool> {

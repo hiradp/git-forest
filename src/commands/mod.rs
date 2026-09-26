@@ -11,6 +11,7 @@ mod rename;
 mod repos;
 mod setup;
 mod status;
+mod unarchive;
 mod update;
 
 use crate::cli::Command;
@@ -33,6 +34,9 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
         Command::Update(arguments) => update::run(config, git, arguments),
         Command::Create(arguments) => create::run_create(config, git, arguments),
         Command::Add(arguments) => create::run_add(config, git, arguments),
+        Command::List(arguments) if arguments.archived => list::archived(config)
+            .map(CommandReport::ArchivesList)
+            .map(CommandOutcome::success),
         Command::List(_) => list::run(config, git)
             .map(CommandReport::WorkspacesList)
             .map(CommandOutcome::success),
@@ -45,6 +49,7 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
         Command::Attach(arguments) => attach::run(config, git, herdr, arguments),
         Command::Rename(arguments) => rename::run(config, git, arguments),
         Command::Archive(arguments) => archive::run(config, git, arguments),
+        Command::Unarchive(arguments) => unarchive::run(config, git, arguments),
         Command::Delete(arguments) => delete::run(config, git, arguments),
         Command::Clean(_) => clean::run(config, git),
         Command::Remove(arguments) => remove::run(config, git, arguments),

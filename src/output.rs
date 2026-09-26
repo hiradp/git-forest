@@ -6,9 +6,10 @@ use crate::domain::{
     ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CleanStatus, CommandReport,
     DeleteStatus, FetchStatus, RemovalStatus, RenameStatus, RepositoriesFetchReport,
     RepositoriesReport, RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval,
-    SetupStatus, UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport,
+    SetupStatus, UnarchiveStatus, UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport,
     WorkspaceChangeReport, WorkspaceDeleteReport, WorkspaceListEntry, WorkspaceRemovalReport,
-    WorkspaceRenameReport, WorkspaceRenameStatus, WorkspaceStatusEntry, WorktreesCleanReport,
+    WorkspaceRenameReport, WorkspaceRenameStatus, WorkspaceStatusEntry, WorkspaceUnarchiveReport,
+    WorktreesCleanReport,
 };
 use crate::error::{AppError, Result};
 
@@ -110,6 +111,8 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::RepositoriesUpdate(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceChange(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesList(report) => render_json(&mut writer, report)?,
+            CommandReport::ArchivesList(report) => render_json(&mut writer, report)?,
+            CommandReport::WorkspaceUnarchive(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacePath(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
@@ -154,6 +157,26 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
                 render_workspace_list(&mut writer, workspace, styles)?;
             }
             Ok(())
+        }
+        CommandReport::ArchivesList(report) => {
+            if report.archives.is_empty() {
+                writeln!(writer, "No archives found.").map_err(AppError::WriteOutput)?;
+            }
+            for archive in &report.archives {
+                writeln!(
+                    writer,
+                    "{}  {}  (ID: {})\n  {}",
+                    archive.workspace,
+                    crate::archives::display_date(&archive.archive_id),
+                    archive.archive_id,
+                    archive.archive_path.display()
+                )
+                .map_err(AppError::WriteOutput)?;
+            }
+            Ok(())
+        }
+        CommandReport::WorkspaceUnarchive(report) => {
+            render_workspace_unarchive(&mut writer, report, styles)
         }
         CommandReport::WorkspacesStatus(report) => {
             if report.workspaces.is_empty() {
@@ -835,6 +858,7 @@ fn render_workspace_archive(
     )?;
     render_header_field(writer, "Path", report.path.display(), "", styles)?;
     render_header_field(writer, "Archive", report.archive_path.display(), "", styles)?;
+    render_header_field(writer, "Archive ID", &report.archive_id, "", styles)?;
     writeln!(writer).map_err(AppError::WriteOutput)?;
 
     render_repository_removals(writer, &report.repositories, styles)?;
@@ -856,6 +880,36 @@ fn render_workspace_archive(
         for entry in &report.preserved_entries {
             writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
         }
+    }
+    Ok(())
+}
+
+fn render_workspace_unarchive(
+    writer: &mut impl Write,
+    report: &WorkspaceUnarchiveReport,
+    styles: Styles,
+) -> Result<()> {
+    render_workspace_change(
+        writer,
+        &WorkspaceChangeReport {
+            workspace: report.workspace.clone(),
+            path: report.path.clone(),
+            repositories: report.repositories.clone(),
+        },
+        styles,
+    )?;
+    if let Some(id) = &report.archive_id {
+        render_header_field(writer, "Archive ID", id, "", styles)?;
+    }
+    let summary = match report.status {
+        UnarchiveStatus::Unarchived => "Workspace unarchived.",
+        UnarchiveStatus::AlreadyActive => "Workspace is already active.",
+        UnarchiveStatus::Conflict => "Workspace was not unarchived.",
+        UnarchiveStatus::Failed => "Workspace restoration failed.",
+    };
+    writeln!(writer, "\n{summary}").map_err(AppError::WriteOutput)?;
+    if let Some(message) = &report.message {
+        render_message(writer, message, styles)?;
     }
     Ok(())
 }

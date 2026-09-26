@@ -57,7 +57,15 @@ pub fn workspaces(current: &OsStr) -> Vec<CompletionCandidate> {
         return Vec::new();
     };
 
-    let mut names = workspace_directories(&config);
+    let mut names = if line.subcommand() == Some("unarchive") {
+        crate::archives::scan(&config)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| entry.workspace)
+            .collect()
+    } else {
+        workspace_directories(&config)
+    };
     if matches!(line.subcommand(), Some("remove" | "rename" | "status"))
         && let Ok(states) = workspace::scan(&config, &Git)
     {
@@ -67,6 +75,25 @@ pub fn workspaces(current: &OsStr) -> Vec<CompletionCandidate> {
     names.sort();
     names.dedup();
     candidates(names)
+}
+
+pub fn archive_ids(current: &OsStr) -> Vec<CompletionCandidate> {
+    let Some(line) = CompletionLine::from_environment() else {
+        return Vec::new();
+    };
+    let (Some(config), Some(workspace), Some(current)) =
+        (line.load_config(), line.workspace(), current.to_str())
+    else {
+        return Vec::new();
+    };
+    candidates(
+        crate::archives::for_workspace(&config, workspace)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| entry.archive_id)
+            .filter(|id| id.starts_with(current))
+            .collect(),
+    )
 }
 
 pub fn repositories(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -239,6 +266,7 @@ impl CompletionLine {
                     | "attach"
                     | "rename"
                     | "archive"
+                    | "unarchive"
                     | "delete"
                     | "clean"
                     | "remove"
@@ -265,7 +293,7 @@ impl CompletionLine {
         };
         let positional = positional_values(&self.prior[index + 1..]);
         match subcommand {
-            "create" | "add" | "remove" => positional.into_iter().skip(1).collect(),
+            "create" | "add" | "remove" | "unarchive" => positional.into_iter().skip(1).collect(),
             "fetch" | "update" => positional,
             _ => Vec::new(),
         }
@@ -280,7 +308,10 @@ fn positional_values(arguments: &[OsString]) -> Vec<&str> {
             index += 1;
             continue;
         };
-        if matches!(argument, "--config" | "--jobs" | "--base" | "--branch") {
+        if matches!(
+            argument,
+            "--config" | "--jobs" | "--base" | "--branch" | "--archive" | "--as"
+        ) {
             index += 2;
             continue;
         }

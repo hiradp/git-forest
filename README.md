@@ -152,12 +152,13 @@ git forest fetch [<repository>...] [--jobs <N>] [--json]
 git forest update [<repository>...] [--jobs <N>] [--json]
 git forest create <workspace> [<checkout>...] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
-git forest list [--json]
+git forest list [--archived] [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
+git forest unarchive <workspace> [<checkout>...] [--archive <ID>] [--as <workspace>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest delete <workspace> [--force] [--json]
 git forest clean [--json]
 git forest remove <workspace> [<checkout>...] [--force] [--json]
@@ -279,7 +280,9 @@ git forest update
 provided, it creates an empty workspace directory; repositories can be added
 later with `add`. Repeating empty creation is safe. `add` requires an existing
 workspace and at least one checkout. Both use the same idempotent creation
-engine.
+engine. Archived names remain available: `create` starts a fresh active workspace
+without restoring or changing saved files. Existing branches may still be reused;
+use `unarchive` to restore saved workspace files instead.
 
 ```sh
 git forest create scratch
@@ -361,6 +364,11 @@ and layout mismatches. Workspace-local entries are direct children that are not
 configured checkout paths; they are supported and do not make the workspace
 inconsistent. The JSON field remains `unexpected_entries` for compatibility.
 
+`list --archived` shows saved archives instead of active workspaces, with each
+archive's workspace, human-readable date, ID, and path.
+Legacy archives show `legacy` instead of a date. Use the ID with
+`unarchive --archive <ID>` when a workspace has several archives.
+
 `status` additionally reports:
 
 - current branch or detached state;
@@ -432,9 +440,9 @@ git forest rename logical-slots review-123
 Forest preflights the complete workspace, atomically moves its directory, and
 uses `git worktree repair` to update each canonical repository's worktree
 metadata. Dirty, untracked, and ignored files are preserved, as are
-workspace-local entries. An inconsistent source, an active destination, or an
-archive at `.archive/<new-workspace>` prevents all mutation. Rename never
-fetches and has no `--force` option.
+workspace-local entries. An inconsistent source or an active destination
+prevents all mutation. Archives do not reserve names and remain untouched.
+Rename never fetches and has no `--force` option.
 
 Existing branch names are authoritative and remain unchanged. If the branch
 template uses `{workspace}`, a checkout created after the rename uses the new
@@ -454,41 +462,81 @@ Archives an entire workspace while preserving workspace-local files and
 directories. Forest first preflights every configured checkout, then removes all
 clean registered worktrees with `git worktree remove`. Branches are preserved.
 After every removal succeeds, Forest atomically moves the remaining workspace
-directory to `<workspaces.root>/.archive/<workspace>` without replacing an
-existing destination.
+directory to a new generation beneath `<workspaces.root>/.archive/.generations`
+without replacing an existing destination.
 
 ```sh
-git forest archive logical-slots
+git forest archive nkdb-azure
+# Saved beneath .archive/.generations/nkdb-azure--2026-09-26-09-46-11-0700
 ```
 
-Dirty worktrees, unregistered checkout paths, layout mismatches, a missing
-workspace directory, or an existing archive destination prevent archival.
-Passing `--force` removes dirty worktrees anyway, discarding their modified,
-untracked, and ignored files; all other conflicts still prevent archival.
-Workspace-local entries do not. A Git failure can leave a partially removed
-active workspace, and repeating the command safely resumes. Forest serializes
-its `create`, `add`, `rename`, `archive`, `clean`, and `remove` mutations for a
-configuration so they cannot race one another. Repeating a successful archive
-reports `already_archived`. Archived workspaces are excluded
-from `list`, the interactive launcher, active workspace completion, and `path`.
-Forest does not close matching Herdr processes. The archive is local dormant
-storage, not a compressed archive or backup.
+Generation names use `<workspace>--<archive_id>`. IDs use local time and its UTC
+offset (`YYYY-MM-DD-HH-MM-SS±HHMM`), adding `-2`, `-3`, etc. for same-second
+collisions. Older generations remain untouched. Legacy `.archive/<workspace>`
+directories use ID `legacy`; `.generations` keeps timestamp-looking legacy names
+unambiguous without a manifest or database. Within each workspace, archives sort
+by actual instant and numeric suffix, with `legacy` first.
 
-An archived name cannot be reused by `create` or `add` while its archive
-destination exists. Forest does not record a manifest of removed checkouts; to
-resume manually, move the archived directory back to its original workspace
-path and use `add` for the desired checkouts.
+Dirty worktrees, unregistered checkout paths, layout mismatches, or a missing
+workspace directory prevent archival. Passing `--force` removes dirty worktrees
+anyway, discarding their modified, untracked, and ignored files; all other
+conflicts still prevent archival. Workspace-local entries do not. A Git failure
+can leave a partially removed active workspace, and repeating the command safely
+resumes. Forest serializes its `create`, `add`, `rename`, `archive`, `unarchive`,
+`delete`, `clean`, and `remove` mutations for a configuration so they cannot race
+one another. Repeating a successful archive reports `already_archived` and the
+newest generation (or the legacy archive if it is the only one) while no new
+active workspace exists. Archives are excluded from ordinary `list`, the
+interactive launcher, active workspace completion, and `path`; use
+`list --archived` to see them. Forest does not close matching Herdr processes.
+The archive is local dormant storage, not a compressed archive or backup.
+
+### `unarchive`
+
+Restores saved workspace-local files, optionally creating only the checkouts you
+request. Previous checkouts are not recreated automatically: Forest keeps no
+manifest of them. Branch and base overrides work as for `create`.
+
+```sh
+git forest list --archived
+git forest unarchive nkdb-azure api --archive 2026-09-26-09-46-11-0700 --as review-123
+```
+
+A single archive is selected automatically; multiple archives require
+`--archive <ID>` (including `legacy` for an older archive). `--as <workspace>`
+chooses a different active name. Forest preflights every requested checkout
+before moving saved files, refuses an existing active destination, and never
+overwrites files. Restoration consumes the selected archive, leaving other
+generations untouched.
+
+If checkout creation fails after the move, repeat the command. When no matching
+archive remains and the destination is active, Forest reconciles the requested
+checkouts and reports `already_active`. It never merges an archive into an active
+workspace. Without a manifest, it cannot verify the workspace's origin or
+distinguish a well-formed nonexistent ID from a consumed one. Malformed IDs are
+rejected before reconciliation. Invalid IDs and ambiguous selections return
+`conflict` reports.
 
 ### `delete`
 
 Permanently deletes a workspace. Forest first applies the same complete-workspace
 preflight and worktree removal as `archive`, preserving branches and refusing
-dirty or unregistered worktrees. It then permanently removes workspace-local
-files instead of retaining them beneath `.archive`. Pass `--force` to explicitly
-discard modified, untracked, or ignored files in registered worktrees as well.
+dirty or unregistered worktrees. It stages the remaining workspace-local files at
+`.archive/.deleting/<workspace>`, then permanently removes them. Pending deletions
+are excluded from archive discovery and cannot be restored with `unarchive`.
+Pass `--force` to discard modified, untracked, or ignored files in registered
+worktrees as well.
 Force never deletes branches and does not bypass unregistered-path checks.
-Deletion is safe to repeat; a workspace with no active or archived path and no
-remaining Git worktree registrations is reported as already deleted.
+Deleting an active workspace preserves all older archives of that name.
+
+If file removal fails after staging, `delete` reports `failed`; repeat the
+command to remove the pending files. If a new active workspace has reused the
+name, retry refuses both paths until you rename the active workspace.
+
+With no active workspace, remaining registrations, or pending deletion, `delete`
+reports `already_deleted`. It never falls back to retained archives. To delete
+an archive, including a legacy archive, restore it with `unarchive --archive <ID>`
+(optionally `--as <workspace>`), then delete the restored workspace.
 
 ### `clean`
 
@@ -664,6 +712,22 @@ before an action could be selected. A branch created to track an explicit
 }
 ```
 
+### List archived
+
+`list --archived --json` returns archives instead of active workspaces:
+
+```json
+{
+  "archives": [
+    {
+      "workspace": "nkdb-azure",
+      "archive_id": "2026-09-26-09-46-11-0700",
+      "archive_path": "/project/src/.workspaces/.archive/.generations/nkdb-azure--2026-09-26-09-46-11-0700"
+    }
+  ]
+}
+```
+
 ### Status
 
 ```json
@@ -768,7 +832,8 @@ status is `repaired`, `already_repaired`, `failed`, or `not_run`.
 {
   "workspace": "logical-slots",
   "path": "/project/src/.workspaces/logical-slots",
-  "archive_path": "/project/src/.workspaces/.archive/logical-slots",
+  "archive_id": "2026-09-26-09-46-11-0700",
+  "archive_path": "/project/src/.workspaces/.archive/.generations/logical-slots--2026-09-26-09-46-11-0700",
   "repositories": [
     {
       "name": "api",
@@ -781,7 +846,7 @@ status is `repaired`, `already_repaired`, `failed`, or `not_run`.
   ],
   "status": "archived",
   "preserved_entries": [
-    "/project/src/.workspaces/.archive/logical-slots/notes.md"
+    "/project/src/.workspaces/.archive/.generations/logical-slots--2026-09-26-09-46-11-0700/notes.md"
   ],
   "message": null
 }
@@ -789,6 +854,29 @@ status is `repaired`, `already_repaired`, `failed`, or `not_run`.
 
 Archive status is `archived`, `already_archived`, `conflict`, or `failed`.
 Repository removal statuses have the same meanings as for `remove`.
+
+### Unarchive
+
+Restoring saved files without requesting checkouts:
+
+```json
+{
+  "source_workspace": "nkdb-azure",
+  "workspace": "review-123",
+  "path": "/project/src/.workspaces/review-123",
+  "archive_id": "2026-09-26-09-46-11-0700",
+  "archive_path": "/project/src/.workspaces/.archive/.generations/nkdb-azure--2026-09-26-09-46-11-0700",
+  "repositories": [],
+  "status": "unarchived",
+  "message": null
+}
+```
+
+Unarchive status is `unarchived`, `already_active`, `conflict`, or `failed`.
+Requested checkout reports in `repositories` use the same fields and statuses
+as `create`. `archive_path` records the selected source, even after its move;
+it is `null` on a retry when that archive has already been consumed.
+`archive_id` is `null` when no archive is selected and no ID was supplied.
 
 ### Delete
 
@@ -808,15 +896,16 @@ Repository removal statuses have the same meanings as for `remove`.
   ],
   "status": "deleted",
   "deleted_entries": [
-    "/project/src/.workspaces/.archive/logical-slots/notes.md"
+    "/project/src/.workspaces/.archive/.deleting/logical-slots/notes.md"
   ],
   "message": null
 }
 ```
 
 Delete status is `deleted`, `already_deleted`, `conflict`, or `failed`.
-`deleted_entries` lists workspace-local paths removed by a successful deletion.
-Repository removal statuses have the same meanings as for `remove`.
+`deleted_entries` lists the deletion staging paths of removed workspace-local
+entries, excluding retained archives. Repository removal statuses have the same
+meanings as for `remove`.
 
 ### Clean
 

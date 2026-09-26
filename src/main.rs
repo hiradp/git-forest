@@ -1,3 +1,4 @@
+mod archives;
 mod cli;
 mod commands;
 mod completion;

@@ -54,7 +54,7 @@ pub enum Command {
     Add(AddArgs),
 
     /// List workspaces
-    List(OutputArgs),
+    List(ListArgs),
 
     /// Show workspace and worktree status
     Status(StatusArgs),
@@ -71,7 +71,10 @@ pub enum Command {
     /// Retire a workspace while preserving workspace-local entries
     Archive(ArchiveArgs),
 
-    /// Permanently delete a workspace while preserving its branches
+    /// Restore archived workspace files, optionally recreating linked worktrees
+    Unarchive(UnarchiveArgs),
+
+    /// Permanently delete an active workspace while preserving its branches
     Delete(DeleteArgs),
 
     /// Remove stale registrations for manually deleted worktrees
@@ -88,7 +91,8 @@ impl Command {
     pub fn json(&self) -> bool {
         match self {
             Self::Open => false,
-            Self::Setup(args) | Self::Repos(args) | Self::List(args) => args.json,
+            Self::Setup(args) | Self::Repos(args) => args.json,
+            Self::List(args) => args.output.json,
             Self::Fetch(args) => args.output.json,
             Self::Update(args) => args.output.json,
             Self::Create(args) => args.output.json,
@@ -98,6 +102,7 @@ impl Command {
             Self::Attach(args) => args.output.json,
             Self::Rename(args) => args.output.json,
             Self::Archive(args) => args.output.json,
+            Self::Unarchive(args) => args.creation.output.json,
             Self::Delete(args) => args.output.json,
             Self::Clean(args) => args.json,
             Self::Remove(args) => args.output.json,
@@ -128,6 +133,30 @@ pub struct OutputArgs {
     /// Emit structured JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// List archive generations instead of active workspaces
+    #[arg(long)]
+    pub archived: bool,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct UnarchiveArgs {
+    #[command(flatten)]
+    pub creation: CreateArgs,
+
+    /// Select an archive ID from `list --archived` (or "legacy")
+    #[arg(long, value_name = "ID", add = ArgValueCompleter::new(completion::archive_ids))]
+    pub archive: Option<String>,
+
+    /// Restore under a different active workspace name
+    #[arg(long = "as", value_name = "WORKSPACE")]
+    pub destination: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -164,7 +193,7 @@ pub struct CreateArgs {
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
-    /// Configured repository checkouts in REPOSITORY[@SLOT] form; omit for an empty workspace
+    /// Configured repository checkouts in REPOSITORY[@SLOT] form; omit to create no checkouts
     #[arg(add = ArgValueCompleter::new(completion::checkouts))]
     pub checkouts: Vec<CheckoutId>,
 

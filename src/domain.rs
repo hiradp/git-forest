@@ -91,7 +91,7 @@ pub struct WorkspaceChangeReport {
     pub repositories: Vec<RepositoryChangeReport>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RepositoryChangeReport {
     pub name: String,
     pub checkout: String,
@@ -125,6 +125,39 @@ pub enum ChangeStatus {
 #[derive(Debug, Serialize)]
 pub struct WorkspacesListReport {
     pub workspaces: Vec<WorkspaceListEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArchivesListReport {
+    pub archives: Vec<ArchiveListEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArchiveListEntry {
+    pub workspace: String,
+    pub archive_id: String,
+    pub archive_path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceUnarchiveReport {
+    pub source_workspace: String,
+    pub workspace: String,
+    pub path: PathBuf,
+    pub archive_id: Option<String>,
+    pub archive_path: Option<PathBuf>,
+    pub repositories: Vec<RepositoryChangeReport>,
+    pub status: UnarchiveStatus,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnarchiveStatus {
+    Unarchived,
+    AlreadyActive,
+    Conflict,
+    Failed,
 }
 
 #[derive(Debug, Serialize)]
@@ -260,6 +293,7 @@ pub enum RenameStatus {
 pub struct WorkspaceArchiveReport {
     pub workspace: String,
     pub path: PathBuf,
+    pub archive_id: String,
     pub archive_path: PathBuf,
     pub repositories: Vec<RepositoryRemoval>,
     pub status: ArchiveStatus,
@@ -370,6 +404,8 @@ pub enum CommandReport {
     RepositoriesUpdate(RepositoriesUpdateReport),
     WorkspaceChange(WorkspaceChangeReport),
     WorkspacesList(WorkspacesListReport),
+    ArchivesList(ArchivesListReport),
+    WorkspaceUnarchive(WorkspaceUnarchiveReport),
     WorkspacesStatus(WorkspacesStatusReport),
     WorkspacePath(WorkspacePathReport),
     WorkspaceAttach(WorkspaceAttachReport),

@@ -110,6 +110,11 @@ to override a creation base and
 to select an existing local branch or create one from its remote-tracking ref.
 Creation preflights every requested checkout before mutation and is safe to
 repeat after partial execution.
+Archived names remain available: creation starts a fresh active workspace and
+leaves saved files untouched, though existing branches may be reused.
+Use
+.B unarchive
+to restore saved workspace files.
 .TP
 .BI add " workspace checkout ..."
 Add primary or named linked worktrees to an existing workspace.
@@ -120,9 +125,26 @@ and
 options as
 .BR create .
 .TP
-.B list
-List workspaces by reconciling workspace directories with Git worktree
+.B list [\-\-archived]
+List active workspaces by reconciling workspace directories with Git worktree
 metadata.
+With
+.BR \-\-archived ,
+list archives instead, with workspace name, human-readable date, archive ID,
+and path.
+Legacy archives show
+.B legacy
+instead of a date.
+JSON output uses an
+.B archives
+array containing
+.BR workspace ,
+.BR archive_id ,
+and
+.B archive_path
+fields rather than the active
+.B workspaces
+array.
 .TP
 .BI status " [workspace]"
 Show workspace and worktree status, including dirty state, upstream, and
@@ -142,35 +164,129 @@ uses
 .B git worktree repair
 to update worktree metadata in each canonical repository.
 Dirty files and workspace-local entries are preserved.
-An inconsistent source, active destination, or archive using the new name
-prevents the rename.
+An inconsistent source or active destination prevents the rename.
+Archives do not reserve names and remain untouched.
 If Git repair fails after the directory moves, repeating the same command
 resumes the incomplete repair.
 Forest does not update Herdr runtime metadata.
 .TP
-.BI archive " workspace"
+.BI archive " workspace [\-\-force]"
 Remove every clean registered worktree in a workspace, preserve its branches,
-and move its workspace-local entries to
-.BI workspaces.root /.archive/ workspace .
-Archival rejects dirty or unregistered worktrees and archive destinations that
-conflict with an active workspace, never overwrites files, and is safe to repeat
-after partial execution.
-Repeating a successful archive reports it as already archived.
-Archived workspaces are excluded from the active workspace list and launcher.
+and move its workspace-local entries to a new generation beneath
+.BR workspaces.root/.archive/.generations .
+For example:
+.BR .archive/.generations/nkdb-azure\-\-2026-09-26-09-46-11-0700 .
+IDs use local time and its UTC offset in YYYY-MM-DD-HH-MM-SS\(+-HHMM form;
+same-second collisions append -2, -3, and so on.
+Older generations remain untouched.
+Legacy
+.B .archive/workspace
+directories remain supported with ID
+.BR legacy .
+The separate
+.B .generations
+directory disambiguates timestamp-looking legacy workspace names.
+There is no manifest or database.
+Within a workspace, archives are ordered by their actual instant and numeric
+collision suffix, with legacy archives first.
+Archival rejects dirty or unregistered worktrees, never overwrites files, and is
+safe to repeat after partial execution.
+Use
+.B \-\-force
+only to explicitly discard modified, untracked, or ignored worktree files.
+Repeating a successful archive reports it as already archived while no new
+active workspace exists, selecting the newest generation or the legacy archive
+if it is the only one.
+Archives are excluded from the active workspace list and launcher; use
+.B list \-\-archived
+to see them.
+The JSON archive report includes
+.B archive_id
+alongside the existing fields.
 .TP
-.BI delete " workspace"
+.BI unarchive " workspace [checkout ...] [\-\-archive ID] [\-\-as workspace]"
+Restore saved workspace-local files, optionally creating only the requested
+checkouts; previous checkouts are not recreated automatically.
+It accepts the same
+.B \-\-base
+and
+.B \-\-branch
+options as
+.BR create .
+A single archive is selected automatically; multiple archives require
+.BR "\-\-archive ID" .
+Use ID
+.B legacy
+for an older archive, and
+.B \-\-as
+to restore under a different active workspace name.
+Forest preflights all requested checkouts before moving files, refuses an
+existing active destination, and never overwrites files.
+Restoration consumes the selected archive and leaves other generations
+untouched.
+If checkout creation fails after the move, repeat the command.
+When no matching archive remains and the destination is active,
+Forest reconciles requested checkouts and reports
+.BR already_active .
+It never merges an archive into an active workspace.
+Without a manifest, it cannot verify the workspace's origin or distinguish a
+well-formed nonexistent ID from a consumed one.
+Malformed IDs are rejected before reconciliation.
+Invalid IDs and ambiguous selections return conflict reports.
+The JSON report contains
+.BR source_workspace ,
+.BR workspace ,
+.BR path ,
+.BR archive_id ,
+.BR archive_path ,
+.BR repositories ,
+.BR status ,
+and
+.BR message .
+Status is
+.BR unarchived ,
+.BR already_active ,
+.BR conflict ,
+or
+.BR failed .
+Checkout reports use the same fields as
+.BR create .
+The archive path records the selected source, even after its move; it is null
+on a retry after consumption.
+The archive ID is null when none is selected or supplied.
+.TP
+.BI delete " workspace [\-\-force]"
 Permanently delete a workspace while preserving its Git branches.
 Forest first applies the same complete-workspace preflight and worktree removal
 as
 .BR archive ,
-then permanently removes workspace-local files instead of retaining them beneath
-.BR .archive .
+then stages workspace-local files at
+.B .archive/.deleting/workspace
+and permanently removes them.
+Pending deletions are excluded from archive discovery and cannot be restored
+with
+.BR unarchive .
 Dirty or unregistered worktrees prevent deletion.
 Use
 .B \-\-force
 only to explicitly discard modified, untracked, or ignored files in registered
 worktrees; it does not delete branches or bypass unregistered-path checks.
-Deletion is safe to repeat.
+Deleting an active workspace preserves older archives of that name.
+If removal fails after staging, repeat the command to remove the pending files.
+If a new active workspace has reused the name, retry refuses both paths until
+you rename the active workspace.
+With no active workspace, remaining registrations, or pending deletion, the
+workspace is reported as already deleted.
+Deletion never falls back to retained archives.
+To delete an archive, including a legacy archive, restore it with
+.B unarchive \-\-archive ID
+(optionally using
+.BR \-\-as )
+and then delete the restored workspace.
+The JSON
+.B deleted_entries
+field lists deletion staging paths of removed workspace-local entries,
+excluding retained archives.
 .TP
 .B clean
 Remove stale Git registrations for manually deleted Forest worktrees.
@@ -201,6 +317,18 @@ Generate dynamic shell completion setup for
 or
 .BR zsh .
 This command does not require a Forest configuration.
+.PP
+Forest serializes
+.BR create ,
+.BR add ,
+.BR rename ,
+.BR archive ,
+.BR unarchive ,
+.BR delete ,
+.BR clean ,
+and
+.B remove
+mutations for a configuration so they cannot race one another.
 .SH SHELL COMPLETION
 Evaluate the generated setup from the shell startup file.
 For Bash or Zsh:
