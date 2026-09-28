@@ -310,7 +310,7 @@ fn positional_values(arguments: &[OsString]) -> Vec<&str> {
         };
         if matches!(
             argument,
-            "--config" | "--jobs" | "--base" | "--branch" | "--archive" | "--as"
+            "--config" | "--jobs" | "--base" | "--branch" | "--archive" | "--as" | "--symbol"
         ) {
             index += 2;
             continue;

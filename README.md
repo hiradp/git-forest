@@ -150,7 +150,7 @@ git forest setup [--json]
 git forest repos [--json]
 git forest fetch [<repository>...] [--jobs <N>] [--json]
 git forest update [<repository>...] [--jobs <N>] [--json]
-git forest create <workspace> [<checkout>...] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
+git forest create <workspace> [<checkout>...] [--symbol <symbol>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest list [--archived] [--json]
 git forest status [<workspace>] [--json]
@@ -158,7 +158,7 @@ git forest path <workspace> [--json]
 git forest attach <workspace> [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
-git forest unarchive <workspace> [<checkout>...] [--archive <ID>] [--as <workspace>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
+git forest unarchive <workspace> [<checkout>...] [--archive <ID>] [--as <workspace>] [--symbol <symbol>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest delete <workspace> [--force] [--json]
 git forest clean [--json]
 git forest remove <workspace> [<checkout>...] [--force] [--json]
@@ -289,6 +289,24 @@ git forest create scratch
 git forest add scratch api
 ```
 
+Assign an emoji or symbol for the Herdr workspace name with `--symbol`:
+
+```sh
+git forest create logical-slots api operator --symbol "🌲"
+git forest attach logical-slots
+# Herdr workspace name: 🌲 logical-slots
+```
+
+The symbol is stored in the optional workspace-local `.forest-symbol` file.
+Directory names, branch names, and JSON workspace identifiers stay unchanged.
+Symbols may include composed emoji, but must not contain whitespace or control
+characters. To set or change a symbol on an existing workspace, repeat `create`
+with `--symbol`; omitting it preserves the saved symbol. Symbols survive rename,
+archive, and unarchive. `unarchive --symbol` overrides the saved symbol.
+Trailing whitespace in `.forest-symbol` is ignored when reading it; an empty or
+otherwise invalid symbol is reported with the file path. The file appears in
+workspace entries like other workspace-local files.
+
 Before mutation, every requested checkout is checked for:
 
 - a present canonical Git worktree;
@@ -404,6 +422,11 @@ not start commands:
   the primary checkout before named slots;
 - each managed tab's numeric prefix matches its current Herdr tab position,
   such as `2-api` and `3-operator`.
+
+When a workspace has a saved symbol, Forest prefixes its Herdr name with the
+symbol and a space, and updates that name on subsequent attachments. Without a
+symbol, new Herdr workspaces use the plain workspace name and existing Herdr
+names are left alone.
 
 Forest records the canonical workspace path in Herdr's runtime metadata. A
 later attachment with one matching Herdr workspace reuses it, creates missing
@@ -572,6 +595,10 @@ Removal is deliberately conservative:
 - branches are never deleted;
 - the workspace directory is removed only when it is empty;
 - workspace-local entries are reported and preserved.
+
+A saved `.forest-symbol` is preserved too, so `remove` leaves the workspace
+directory in place even after its last checkout is removed. Use `delete` to
+remove the workspace and its local files.
 
 Removing only named checkout identifiers leaves other worktrees in place.
 `remove stacked api@part-2` removes only that named checkout; `api` continues

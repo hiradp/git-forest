@@ -108,6 +108,16 @@ Use
 to override a creation base and
 .BI \-\-branch " checkout=branch"
 to select an existing local branch or create one from its remote-tracking ref.
+Use
+.BI \-\-symbol " symbol"
+to prefix the Herdr workspace name with an emoji or symbol and a space.
+The optional workspace-local
+.B .forest-symbol
+file preserves it across rename, archive, and unarchive.
+Symbols must be nonempty and contain no whitespace or control characters;
+composed emoji are supported. Trailing whitespace in the saved file is ignored.
+Repeating creation with this option updates the symbol; omitting it preserves
+any saved symbol. Directory and branch names are unaffected.
 Creation preflights every requested checkout before mutation and is safe to
 repeat after partial execution.
 Archived names remain available: creation starts a fresh active workspace and
@@ -155,6 +165,8 @@ Print the absolute path of an existing workspace.
 .TP
 .BI attach " workspace"
 Open an existing workspace in a running Herdr session.
+A saved symbol prefixes the Herdr workspace name and is reconciled on each
+attachment. Without a symbol, existing Herdr workspace names are left alone.
 .TP
 .BI rename " workspace new-workspace"
 Rename an active workspace without changing its branches or working tree
@@ -213,6 +225,9 @@ and
 .B \-\-branch
 options as
 .BR create .
+Use
+.BI \-\-symbol " symbol"
+to override the saved symbol when restoring; otherwise it is preserved.
 A single archive is selected automatically; multiple archives require
 .BR "\-\-archive ID" .
 Use ID
@@ -307,6 +322,12 @@ for present worktrees and stale registrations whose paths are already missing,
 preserves branches, and requires
 .B \-\-force
 before discarding modified, untracked, or ignored files.
+Workspace-local files, including
+.BR .forest-symbol ,
+are reported and preserved; only an empty workspace directory is removed.
+Use
+.B delete
+to remove the workspace and its local files.
 .TP
 .BI completions " shell"
 Generate dynamic shell completion setup for

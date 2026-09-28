@@ -75,6 +75,9 @@ pub fn run(config: &Config, git: &Git, arguments: &UnarchiveArgs) -> Result<Comm
     }
 
     if let Some(selected) = selected {
+        if let Some(symbol) = arguments.creation.symbol.as_deref() {
+            workspace::prepare_symbol(&selected.path, symbol)?;
+        }
         if !archive::rename_is_supported()
             || !archive::same_filesystem(&selected.path, &config.workspaces_root)?
         {
@@ -119,6 +122,7 @@ pub fn run(config: &Config, git: &Git, arguments: &UnarchiveArgs) -> Result<Comm
 
     let creation = CreateArgs {
         workspace: destination.to_owned(),
+        symbol: arguments.creation.symbol.clone(),
         checkouts: arguments.creation.checkouts.clone(),
         bases: arguments.creation.bases.clone(),
         branches: arguments.creation.branches.clone(),

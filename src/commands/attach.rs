@@ -99,6 +99,11 @@ pub fn run(
         });
     }
 
+    let symbol = workspace::read_symbol(&identity_path)?;
+    let workspace_label = match &symbol {
+        Some(symbol) => format!("{symbol} {}", arguments.workspace),
+        None => arguments.workspace.clone(),
+    };
     let workspaces = herdr.workspaces()?;
     let matching_workspaces = workspaces
         .iter()
@@ -136,12 +141,16 @@ pub fn run(
         if let Some((existing, recovered)) = existing {
             let (mut status, tabs, main_tab_id) =
                 reconcile_existing(herdr, &existing.id, &desired_tabs)?;
+            if symbol.is_some() && existing.label.as_deref() != Some(&workspace_label) {
+                herdr.rename_workspace(&existing.id, &workspace_label)?;
+                status = AttachStatus::Reconciled;
+            }
             if recovered {
                 status = AttachStatus::Reconciled;
             }
             (existing.id, status, tabs, main_tab_id)
         } else {
-            create_workspace(herdr, &arguments.workspace, identity, &desired_tabs)?
+            create_workspace(herdr, &workspace_label, identity, &desired_tabs)?
         };
 
     herdr.focus_workspace(&herdr_workspace_id)?;
@@ -214,7 +223,12 @@ fn recoverable_workspace(
     let mut recoverable = Vec::new();
     for workspace in workspaces.iter().filter(|workspace| {
         !workspace.tokens.contains_key(WORKSPACE_PATH_TOKEN)
-            && workspace.label.as_deref() == Some(workspace_name)
+            && workspace.label.as_deref().is_some_and(|label| {
+                label == workspace_name
+                    || label.split_once(' ').is_some_and(|(symbol, name)| {
+                        name == workspace_name && workspace::validate_symbol(symbol).is_ok()
+                    })
+            })
     }) {
         let tabs = herdr.tabs(&workspace.id)?;
         let panes = herdr.panes(&workspace.id)?;

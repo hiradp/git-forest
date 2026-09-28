@@ -69,6 +69,71 @@ pub fn lock_mutations(_config: &Config) -> Result<Option<MutationLock>> {
     Ok(None)
 }
 
+const SYMBOL_FILE: &str = ".forest-symbol";
+
+pub fn validate_symbol(symbol: &str) -> std::result::Result<(), &'static str> {
+    if symbol.is_empty() || symbol.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(
+            "workspace symbol must be nonempty and contain no whitespace or control characters",
+        );
+    }
+    Ok(())
+}
+
+fn symbol_file_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(AppError::Operational(format!(
+            "workspace symbol {} must be a regular file, not a directory or symlink",
+            path.display()
+        ))),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(AppError::Filesystem {
+            context: format!("could not inspect workspace symbol {}", path.display()),
+            source,
+        }),
+    }
+}
+
+pub fn prepare_symbol(workspace: &Path, symbol: &str) -> Result<()> {
+    validate_symbol(symbol).map_err(|message| AppError::InvalidInput(message.to_owned()))?;
+    symbol_file_exists(&workspace.join(SYMBOL_FILE))?;
+    Ok(())
+}
+
+pub fn read_symbol(workspace: &Path) -> Result<Option<String>> {
+    let path = workspace.join(SYMBOL_FILE);
+    if !symbol_file_exists(&path)? {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path).map_err(|source| AppError::Filesystem {
+        context: format!("could not read workspace symbol {}", path.display()),
+        source,
+    })?;
+    let symbol = contents.trim_end();
+    validate_symbol(symbol).map_err(|message| {
+        AppError::Operational(format!("invalid symbol file {}: {message}", path.display()))
+    })?;
+    Ok(Some(symbol.to_owned()))
+}
+
+pub fn write_symbol(workspace: &Path, symbol: &str) -> Result<()> {
+    use std::io::Write;
+
+    prepare_symbol(workspace, symbol)?;
+    let path = workspace.join(SYMBOL_FILE);
+    let write = || -> std::io::Result<()> {
+        let mut temporary = tempfile::NamedTempFile::new_in(workspace)?;
+        writeln!(temporary, "{symbol}")?;
+        temporary.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    write().map_err(|source| AppError::Filesystem {
+        context: format!("could not write workspace symbol {}", path.display()),
+        source,
+    })
+}
+
 struct RepositoryRegistry<'a> {
     repository: &'a RepositoryConfig,
     worktrees: Vec<Worktree>,

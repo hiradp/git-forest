@@ -193,6 +193,10 @@ pub struct CreateArgs {
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
+    /// Emoji or symbol to prefix the Herdr workspace name
+    #[arg(long, value_name = "SYMBOL")]
+    pub symbol: Option<String>,
+
     /// Configured repository checkouts in REPOSITORY[@SLOT] form; omit to create no checkouts
     #[arg(add = ArgValueCompleter::new(completion::checkouts))]
     pub checkouts: Vec<CheckoutId>,

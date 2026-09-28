@@ -14,6 +14,7 @@ use crate::git::{Git, branch_names_conflict, branch_names_equal, failure_message
 #[derive(Debug, Clone, Copy)]
 struct Arguments<'a> {
     workspace: &'a str,
+    symbol: Option<&'a str>,
     checkouts: &'a [CheckoutId],
     bases: &'a [BaseOverride],
     branches: &'a [BranchOverride],
@@ -23,6 +24,7 @@ impl<'a> From<&'a CreateArgs> for Arguments<'a> {
     fn from(arguments: &'a CreateArgs) -> Self {
         Self {
             workspace: &arguments.workspace,
+            symbol: arguments.symbol.as_deref(),
             checkouts: &arguments.checkouts,
             bases: &arguments.bases,
             branches: &arguments.branches,
@@ -34,6 +36,7 @@ impl<'a> From<&'a AddArgs> for Arguments<'a> {
     fn from(arguments: &'a AddArgs) -> Self {
         Self {
             workspace: &arguments.workspace,
+            symbol: None,
             checkouts: &arguments.checkouts,
             bases: &arguments.bases,
             branches: &arguments.branches,
@@ -112,6 +115,7 @@ fn path_occupied(path: &Path) -> Result<bool> {
 
 pub(crate) struct CreationPlan {
     workspace: String,
+    symbol: Option<String>,
     path: PathBuf,
     plans: Vec<Plan>,
 }
@@ -154,6 +158,9 @@ fn prepare(
             "workspace path {} exists and is not a directory",
             workspace_path.display()
         )));
+    }
+    if let Some(symbol) = arguments.symbol {
+        crate::workspace::prepare_symbol(&workspace_path, symbol)?;
     }
     if require_existing_workspace && !workspace_path.is_dir() {
         return Err(AppError::Operational(format!(
@@ -235,6 +242,7 @@ fn prepare(
         .collect::<Vec<_>>();
     Ok(Preparation::Ready(CreationPlan {
         workspace: arguments.workspace.to_owned(),
+        symbol: arguments.symbol.map(str::to_owned),
         path: workspace_path,
         plans,
     }))
@@ -243,6 +251,7 @@ fn prepare(
 pub(crate) fn apply(git: &Git, plan: CreationPlan) -> Result<CommandOutcome> {
     let CreationPlan {
         workspace,
+        symbol,
         path: workspace_path,
         plans,
     } = plan;
@@ -258,6 +267,10 @@ pub(crate) fn apply(git: &Git, plan: CreationPlan) -> Result<CommandOutcome> {
             ),
             source,
         })?;
+    }
+
+    if let Some(symbol) = symbol {
+        crate::workspace::write_symbol(&workspace_path, &symbol)?;
     }
 
     let mut failed = false;

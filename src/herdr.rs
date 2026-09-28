@@ -119,6 +119,13 @@ impl Herdr {
         })
     }
 
+    pub fn rename_workspace(&self, workspace_id: &str, label: &str) -> Result<()> {
+        self.request_value(
+            "could not rename a Herdr workspace",
+            ["workspace", "rename", workspace_id, label],
+        )
+    }
+
     pub fn report_workspace_path(&self, workspace_id: &str, path: &str) -> Result<()> {
         self.request_value(
             "could not identify a Herdr workspace",

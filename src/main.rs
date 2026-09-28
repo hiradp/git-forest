@@ -106,6 +106,7 @@ fn run_launcher(config: &Config) -> Result<u8> {
             let created = execute(
                 &Command::Create(CreateArgs {
                     workspace: workspace.clone(),
+                    symbol: None,
                     checkouts,
                     bases: Vec::new(),
                     branches: Vec::new(),
