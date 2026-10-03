@@ -149,8 +149,12 @@ options as
 .B list [\-\-archived]
 List active workspaces by reconciling workspace directories with Git worktree
 metadata.
-Human output nests workspaces under their parents; JSON reports each
-.BR parent .
+Human output is a tree of workspace names, each under its parent and prefixed
+with its symbol; JSON reports each
+.B parent
+and
+.BR symbol ,
+along with checkouts and inconsistencies.
 With
 .BR \-\-archived ,
 list archives instead, with workspace name, human-readable date, archive ID,

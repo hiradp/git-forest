@@ -402,14 +402,23 @@ Colors are enabled only when stdout is a terminal and can be disabled with
 ### `list` and `status`
 
 `list` reconciles workspace directories with every canonical repository's Git
-worktree metadata. Primary and named checkouts are reported separately. It
-reports unregistered paths, missing registered paths, workspace-local entries,
-and layout mismatches. Workspace-local entries are direct children that are not
-configured checkout paths; they are supported and do not make the workspace
-inconsistent. The JSON field remains `unexpected_entries` for compatibility.
+worktree metadata. Human output is a tree of workspace names, each under its
+parent and prefixed with its saved symbol, or 🌲 when it has none:
 
-Human output nests each workspace under its parent. JSON keeps a flat list and
-reports each workspace's saved `parent`, or `null`.
+```text
+🚦 q4-storage
+├── 🚦 logical-slots
+└── 🌲 replica-lag
+🌲 scratch
+```
+
+JSON keeps a flat list and reports each workspace's saved `parent` and
+`symbol`, or `null`. It also reports primary and named checkouts separately,
+along with unregistered paths, missing registered paths, workspace-local
+entries, and layout mismatches; `status` shows these in human output.
+Workspace-local entries are direct children that are not configured checkout
+paths; they are supported and do not make the workspace inconsistent. The JSON
+field remains `unexpected_entries` for compatibility.
 
 `list --archived` shows saved archives instead of active workspaces, with each
 archive's workspace, human-readable date, ID, and path.
@@ -791,6 +800,7 @@ before an action could be selected. A branch created to track an explicit
       "path": "/project/src/.workspaces/logical-slots",
       "exists": true,
       "parent": "q4-storage",
+      "symbol": "🚦",
       "repositories": [
         {
           "name": "api",

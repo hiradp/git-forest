@@ -3218,10 +3218,10 @@ fn unarchive_validates_and_applies_a_parent_override() {
 }
 
 #[test]
-fn lists_children_indented_under_their_parents() {
+fn lists_workspaces_as_a_tree_under_their_parents() {
     let fixture = WorkspaceFixture::new();
     for arguments in [
-        vec!["create", "zz-project"],
+        vec!["create", "zz-project", "alpha", "--symbol", "🚦"],
         vec!["create", "aa-topic", "--parent", "zz-project"],
     ] {
         assert_success(&forest(&fixture.root, &arguments));
@@ -3231,16 +3231,17 @@ fn lists_children_indented_under_their_parents() {
     let json = forest(&fixture.root, &["list", "--json"]);
 
     assert_success(&human);
-    let human = String::from_utf8(human.stdout).unwrap();
-    let parent = human.find("Workspace  zz-project").unwrap();
-    let child = human.find("    Workspace  aa-topic").unwrap();
-    assert!(parent < child, "{human}");
-    assert!(human.contains("    Parent     zz-project"), "{human}");
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap(),
+        "🚦 zz-project\n└── 🌲 aa-topic\n"
+    );
     assert_success(&json);
     let report: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(report["workspaces"][0]["name"], "aa-topic");
     assert_eq!(report["workspaces"][0]["parent"], "zz-project");
+    assert_eq!(report["workspaces"][0]["symbol"], Value::Null);
     assert_eq!(report["workspaces"][1]["parent"], Value::Null);
+    assert_eq!(report["workspaces"][1]["symbol"], "🚦");
 }
 
 #[test]
@@ -4991,7 +4992,7 @@ fn treats_non_checkout_siblings_as_workspace_entries() {
         serde_json::json!([])
     );
 
-    let human = forest(&fixture.root, &["list"]);
+    let human = forest(&fixture.root, &["status"]);
     assert_success(&human);
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("Workspace entries"));

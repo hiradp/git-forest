@@ -166,6 +166,7 @@ pub struct WorkspaceListEntry {
     pub path: PathBuf,
     pub exists: bool,
     pub parent: Option<String>,
+    pub symbol: Option<String>,
     pub repositories: Vec<WorkspaceListRepository>,
     #[serde(rename = "unexpected_entries")]
     pub workspace_entries: Vec<PathBuf>,

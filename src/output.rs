@@ -21,6 +21,9 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 
+/// Shown beside workspaces that have no saved symbol.
+const DEFAULT_SYMBOL: &str = "🌲";
+
 #[derive(Clone, Copy)]
 struct Styles {
     enabled: bool,
@@ -175,20 +178,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
                 )
                 .map_err(AppError::WriteOutput);
             }
-            let order = tree_order(
-                &report.workspaces,
-                |workspace| &workspace.name,
-                |workspace| workspace.parent.as_deref(),
-            );
-            for (index, (depth, workspace)) in order.into_iter().enumerate() {
-                if index > 0 {
-                    writeln!(writer).map_err(AppError::WriteOutput)?;
-                }
-                render_indented(&mut writer, depth, |writer| {
-                    render_workspace_list(writer, workspace, styles)
-                })?;
-            }
-            Ok(())
+            render_workspace_tree(&mut writer, &report.workspaces, styles)
         }
         CommandReport::ArchivesList(report) => {
             if report.archives.is_empty() {
@@ -552,86 +542,46 @@ fn render_workspace_change(
     Ok(())
 }
 
-fn render_workspace_list(
+/// Renders workspace names as a tree, drawing each workspace under its
+/// parent with its saved symbol.
+fn render_workspace_tree(
     writer: &mut impl Write,
-    workspace: &WorkspaceListEntry,
+    workspaces: &[WorkspaceListEntry],
     styles: Styles,
 ) -> Result<()> {
-    render_workspace_header(
-        writer,
-        &workspace.name,
-        workspace.path.display(),
-        None,
-        workspace.parent.as_deref(),
-        styles,
-    )?;
+    let order = tree_order(
+        workspaces,
+        |workspace| &workspace.name,
+        |workspace| workspace.parent.as_deref(),
+    );
+    // Whether the entry currently open at each depth is its parent's last child.
+    let mut last = Vec::new();
+    for (index, (depth, workspace)) in order.iter().enumerate() {
+        let is_last = order[index + 1..]
+            .iter()
+            .find(|(next, _)| next <= depth)
+            .is_none_or(|(next, _)| next < depth);
+        last.truncate(*depth);
+        last.push(is_last);
 
-    if workspace.repositories.is_empty() {
-        writeln!(writer, "  {}No worktrees.{}", styles.dim(), styles.reset())
-            .map_err(AppError::WriteOutput)?;
-    }
-    let name_width = workspace
-        .repositories
-        .iter()
-        .map(|repository| repository.checkout.chars().count())
-        .max()
-        .unwrap_or(0);
-
-    for repository in &workspace.repositories {
-        let healthy =
-            repository.exists && repository.registered && repository.inconsistencies.is_empty();
-        let (symbol, color) = if healthy {
-            ("✓", styles.green())
-        } else {
-            ("!", styles.yellow())
-        };
-        write!(
+        let mut branches = String::new();
+        for &ended in last.iter().take(*depth).skip(1) {
+            branches.push_str(if ended { "    " } else { "│   " });
+        }
+        if *depth > 0 {
+            branches.push_str(if is_last { "└── " } else { "├── " });
+        }
+        let name_style = if *depth == 0 { styles.bold() } else { "" };
+        writeln!(
             writer,
-            "  {color}{symbol}{} {}{:name_width$}{}  {}",
+            "{}{branches}{}{} {name_style}{}{}",
+            styles.dim(),
             styles.reset(),
-            styles.bold(),
-            repository.checkout,
+            workspace.symbol.as_deref().unwrap_or(DEFAULT_SYMBOL),
+            workspace.name,
             styles.reset(),
-            repository.branch.as_deref().unwrap_or("detached"),
         )
         .map_err(AppError::WriteOutput)?;
-        if !repository.exists {
-            write!(
-                writer,
-                " {}·{} {}missing{}",
-                styles.dim(),
-                styles.reset(),
-                styles.yellow(),
-                styles.reset(),
-            )
-            .map_err(AppError::WriteOutput)?;
-        }
-        if !repository.registered {
-            write!(
-                writer,
-                " {}·{} {}unregistered{}",
-                styles.dim(),
-                styles.reset(),
-                styles.yellow(),
-                styles.reset(),
-            )
-            .map_err(AppError::WriteOutput)?;
-        }
-        writeln!(writer).map_err(AppError::WriteOutput)?;
-        render_inconsistencies(writer, &repository.inconsistencies, "      ", styles)?;
-    }
-
-    render_workspace_entries(writer, &workspace.workspace_entries, styles)?;
-
-    for inconsistency in &workspace.inconsistencies {
-        if !workspace.repositories.iter().any(|repository| {
-            repository
-                .inconsistencies
-                .iter()
-                .any(|repository_issue| repository_issue == inconsistency)
-        }) {
-            render_inconsistency(writer, inconsistency, "  ", styles)?;
-        }
     }
     Ok(())
 }
@@ -1455,6 +1405,44 @@ mod tests {
                 "  ✓ 1-main   created  /workspaces/project\n",
                 "  ✓ 2-topic  created  /workspaces/topic\n",
                 "  ✓ 1-main   reused   /workspaces/other  (Herdr w2)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn renders_workspaces_as_a_tree_of_symbols_and_names() {
+        let workspace =
+            |name: &str, parent: Option<&str>, symbol: Option<&str>| WorkspaceListEntry {
+                name: name.to_owned(),
+                path: PathBuf::from(format!("/workspaces/{name}")),
+                exists: true,
+                parent: parent.map(str::to_owned),
+                symbol: symbol.map(str::to_owned),
+                repositories: Vec::new(),
+                workspace_entries: vec![PathBuf::from("/workspaces/notes.md")],
+                inconsistencies: Vec::new(),
+            };
+        let workspaces = [
+            workspace("project", None, Some("🚦")),
+            workspace("first", Some("project"), Some("🚦")),
+            workspace("nested", Some("first"), None),
+            workspace("second", Some("project"), None),
+            workspace("deep", Some("second"), None),
+            workspace("solo", None, None),
+        ];
+        let mut output = Vec::new();
+
+        render_workspace_tree(&mut output, &workspaces, Styles { enabled: false }).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "🚦 project\n",
+                "├── 🚦 first\n",
+                "│   └── 🌲 nested\n",
+                "└── 🌲 second\n",
+                "    └── 🌲 deep\n",
+                "🌲 solo\n",
             )
         );
     }

@@ -12,6 +12,7 @@ pub fn run(config: &Config, git: &Git) -> Result<WorkspacesListReport> {
             path: workspace.path,
             exists: workspace.exists,
             parent: workspace.metadata.parent,
+            symbol: workspace.metadata.symbol,
             repositories: workspace
                 .members
                 .into_iter()
