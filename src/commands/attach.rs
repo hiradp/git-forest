@@ -11,7 +11,7 @@ use crate::herdr::{
     self, Herdr, HerdrPane, HerdrTab, HerdrWorkspace, TAB_TOKEN, WORKSPACE_ID_TOKEN,
     WORKSPACE_PATH_TOKEN,
 };
-use crate::workspace::{self, Ancestry};
+use crate::workspace::{self, Ancestry, WorkspaceMetadata, WorkspaceState};
 
 const MAIN_ROLE: &str = "main";
 const WORKSPACE_ROLE_PREFIX: &str = "workspace:";
@@ -28,30 +28,8 @@ pub fn run(
     herdr: &Herdr,
     arguments: &AttachArgs,
 ) -> Result<CommandOutcome> {
-    let configured_path = config.workspace_path(&arguments.workspace)?;
     let states = workspace::scan(config, git)?;
-    let Some(state) = states
-        .iter()
-        .find(|state| state.name == arguments.workspace && state.exists)
-    else {
-        return Err(AppError::Operational(format!(
-            "workspace {:?} does not exist",
-            arguments.workspace
-        )));
-    };
-
-    for member in &state.members {
-        if !member.inconsistencies.is_empty() {
-            return Err(AppError::Operational(format!(
-                "workspace {:?} has an inconsistent repository {:?}: {}",
-                arguments.workspace,
-                member.id,
-                member.inconsistencies.join("; ")
-            )));
-        }
-    }
-
-    let metadata = workspace::read_metadata(&state.path)?;
+    let root = preflight(config, &states, &arguments.workspace)?;
     let mut warnings = Vec::new();
     let parent = match workspace::ancestry(&states, &arguments.workspace) {
         Ancestry::Cycle(names) => {
@@ -72,13 +50,123 @@ pub fn run(
             ancestors.first().copied()
         }
     };
+    let mut descendants = Vec::new();
+    if arguments.children {
+        collect_descendants(config, &states, &arguments.workspace, &mut descendants)?;
+    }
 
-    let path = canonicalize(&state.path, "Forest workspace")?;
-    let identity = Identity::new(&path)?;
-    let display_name = match &metadata.symbol {
-        Some(symbol) => format!("{symbol} {}", arguments.workspace),
-        None => arguments.workspace.clone(),
+    let current = herdr.current_workspace_id();
+    let attachment = attach_one(herdr, &root, Placement::Current { current, parent })?;
+    let mut descendant_reports = Vec::with_capacity(descendants.len());
+    for target in &descendants {
+        let host = Placement::Host(attachment.herdr_workspace_id.clone());
+        let attached = attach_one(herdr, target, host)?;
+        descendant_reports.push(report(target, attached, Vec::new()));
+    }
+
+    herdr.focus_workspace(&attachment.herdr_workspace_id)?;
+    herdr.focus_tab(&attachment.tab.herdr_tab_id)?;
+
+    let mut root_report = report(&root, attachment, warnings);
+    root_report.descendants = descendant_reports;
+    Ok(CommandOutcome::success(CommandReport::WorkspaceAttach(
+        root_report,
+    )))
+}
+
+/// A workspace checked before any Herdr call.
+struct Target<'a> {
+    state: &'a WorkspaceState,
+    metadata: WorkspaceMetadata,
+    /// The configured path, which validates the name.
+    configured_path: PathBuf,
+    path: PathBuf,
+    display_name: String,
+}
+
+enum Placement<'a> {
+    /// Beside the parent when it is open in the Herdr workspace `attach` runs in.
+    Current {
+        current: Option<String>,
+        parent: Option<&'a WorkspaceState>,
+    },
+    /// In this Herdr workspace, which holds the root of an `--children` run.
+    Host(String),
+}
+
+fn preflight<'a>(config: &Config, states: &'a [WorkspaceState], name: &str) -> Result<Target<'a>> {
+    let configured_path = config.workspace_path(name)?;
+    let Some(state) = states
+        .iter()
+        .find(|state| state.name == name && state.exists)
+    else {
+        return Err(AppError::Operational(format!(
+            "workspace {name:?} does not exist"
+        )));
     };
+    for member in &state.members {
+        if !member.inconsistencies.is_empty() {
+            return Err(AppError::Operational(format!(
+                "workspace {name:?} has an inconsistent repository {:?}: {}",
+                member.id,
+                member.inconsistencies.join("; ")
+            )));
+        }
+    }
+    let metadata = workspace::read_metadata(&state.path)?;
+    let path = canonicalize(&state.path, "Forest workspace")?;
+    Identity::new(&path)?;
+    let display_name = match &metadata.symbol {
+        Some(symbol) => format!("{symbol} {name}"),
+        None => name.to_owned(),
+    };
+    Ok(Target {
+        state,
+        metadata,
+        configured_path,
+        path,
+        display_name,
+    })
+}
+
+/// Depth-first in name order. The root's ancestry has no cycle and each
+/// workspace has one parent, so this walks a tree.
+fn collect_descendants<'a>(
+    config: &Config,
+    states: &'a [WorkspaceState],
+    name: &str,
+    descendants: &mut Vec<Target<'a>>,
+) -> Result<()> {
+    for child in workspace::children(states, name) {
+        descendants.push(preflight(config, states, &child.name)?);
+        collect_descendants(config, states, &child.name, descendants)?;
+    }
+    Ok(())
+}
+
+fn report(
+    target: &Target<'_>,
+    attachment: Attachment,
+    warnings: Vec<String>,
+) -> WorkspaceAttachReport {
+    WorkspaceAttachReport {
+        workspace: target.state.name.clone(),
+        path: target.configured_path.clone(),
+        parent: target.metadata.parent.clone(),
+        herdr_workspace_id: attachment.herdr_workspace_id,
+        status: attachment.status,
+        tabs: vec![attachment.tab],
+        warnings,
+        descendants: Vec::new(),
+    }
+}
+
+fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> Result<Attachment> {
+    let name = &target.state.name;
+    let metadata = &target.metadata;
+    let display_name = &target.display_name;
+    let path = &target.path;
+    let identity = Identity::new(path)?;
 
     let workspaces = herdr.workspaces()?;
     let tagged_workspaces = workspaces
@@ -100,36 +188,36 @@ pub fn run(
         .collect::<Vec<_>>();
     if tagged_panes.len() > 1 {
         return Err(AppError::Operational(format!(
-            "multiple Herdr panes identify workspace {:?}: {}",
-            arguments.workspace,
+            "multiple Herdr panes identify workspace {name:?}: {}",
             join_ids(tagged_panes.iter().map(|pane| &pane.id))
         )));
     }
 
-    let attachment = match (tagged_workspaces.first(), tagged_panes.first()) {
-        (Some(existing), Some(pane)) => {
-            return Err(AppError::Operational(format!(
-                "workspace {:?} is open both as Herdr workspace {} and as tab {}",
-                arguments.workspace, existing.id, pane.tab_id
-            )));
-        }
+    match (tagged_workspaces.first(), tagged_panes.first()) {
+        (Some(existing), Some(pane)) => Err(AppError::Operational(format!(
+            "workspace {name:?} is open both as Herdr workspace {} and as tab {}",
+            existing.id, pane.tab_id
+        ))),
         (Some(existing), None) => {
             let untagged = existing.tokens.get(WORKSPACE_ID_TOKEN) != Some(&identity.id);
             if untagged {
                 herdr.report_workspace_id(&existing.id, &identity.id)?;
             }
-            reattach_standalone(herdr, existing, &metadata, &display_name, &path, untagged)?
+            reattach_standalone(herdr, existing, metadata, display_name, path, untagged)
         }
-        (None, Some(pane)) => reattach_tab(herdr, pane, &display_name, &path)?,
+        (None, Some(pane)) => reattach_tab(herdr, pane, display_name, path),
         (None, None) => {
-            let untagged_tab = recoverable_tab(herdr, &panes, &display_name, &path)?;
+            let untagged_tab = recoverable_tab(herdr, &panes, display_name, path)?;
             let recoverable = match untagged_tab {
                 Some(_) => None,
-                None => recoverable_workspace(herdr, &workspaces, &arguments.workspace, &path)?,
+                None => recoverable_workspace(herdr, &workspaces, name, path)?,
             };
-            let current = herdr.current_workspace_id();
-            let host = match (parent, current) {
-                (Some(parent), Some(current)) => {
+            let host = match placement {
+                Placement::Host(host) => Some(host),
+                Placement::Current {
+                    current: Some(current),
+                    parent: Some(parent),
+                } => {
                     let parent_path = canonicalize(&parent.path, "parent workspace")?;
                     let parent_identity = Identity::new(&parent_path)?;
                     let parent_display_name = match &parent.metadata.symbol {
@@ -150,39 +238,25 @@ pub fn run(
                                         && has_role(pane, &workspace_role(&parent_identity))
                                 })
                         })
+                        .map(|workspace| workspace.id.clone())
                 }
-                _ => None,
+                Placement::Current { .. } => None,
             };
             if let Some(pane) = untagged_tab {
                 herdr.report_tab_role(&pane.id, &role)?;
-                let mut attachment = reattach_tab(herdr, &pane, &display_name, &path)?;
+                let mut attachment = reattach_tab(herdr, &pane, display_name, path)?;
                 attachment.status = AttachStatus::Reconciled;
-                attachment
+                Ok(attachment)
             } else if let Some(existing) = recoverable {
                 herdr.report_workspace_id(&existing.id, &identity.id)?;
-                reattach_standalone(herdr, &existing, &metadata, &display_name, &path, true)?
+                reattach_standalone(herdr, &existing, metadata, display_name, path, true)
             } else if let Some(host) = host {
-                create_tab(herdr, &host.id, &role, &display_name, &path)?
+                create_tab(herdr, &host, &role, display_name, path)
             } else {
-                create_standalone(herdr, &display_name, &identity, &path)?
+                create_standalone(herdr, display_name, &identity, path)
             }
         }
-    };
-
-    herdr.focus_workspace(&attachment.herdr_workspace_id)?;
-    herdr.focus_tab(&attachment.tab.herdr_tab_id)?;
-
-    Ok(CommandOutcome::success(CommandReport::WorkspaceAttach(
-        WorkspaceAttachReport {
-            workspace: arguments.workspace.clone(),
-            path: configured_path,
-            parent: metadata.parent,
-            herdr_workspace_id: attachment.herdr_workspace_id,
-            status: attachment.status,
-            tabs: vec![attachment.tab],
-            warnings,
-        },
-    )))
+    }
 }
 
 fn create_standalone(

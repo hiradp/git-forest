@@ -802,21 +802,29 @@ fn render_workspace_attach(
     )?;
     writeln!(writer).map_err(AppError::WriteOutput)?;
 
-    let label_width = report
+    let rows = report
         .tabs
         .iter()
-        .map(|tab| tab.label.chars().count())
-        .max()
-        .unwrap_or(0);
-    let status_width = report
-        .tabs
+        .map(|tab| (tab, None))
+        .chain(report.descendants.iter().flat_map(|descendant| {
+            let elsewhere = (descendant.herdr_workspace_id != report.herdr_workspace_id)
+                .then_some(descendant.herdr_workspace_id.as_str());
+            descendant.tabs.iter().map(move |tab| (tab, elsewhere))
+        }))
+        .collect::<Vec<_>>();
+    let label_width = rows
         .iter()
-        .map(|tab| attach_status_name(tab.status).chars().count())
+        .map(|(tab, _)| tab.label.chars().count())
         .max()
         .unwrap_or(0);
-    for tab in &report.tabs {
+    let status_width = rows
+        .iter()
+        .map(|(tab, _)| attach_status_name(tab.status).chars().count())
+        .max()
+        .unwrap_or(0);
+    for (tab, elsewhere) in rows {
         let status = attach_status_name(tab.status);
-        writeln!(
+        write!(
             writer,
             "  {}✓{} {}{:label_width$}{}  {}{status:<status_width$}{}  {}",
             styles.green(),
@@ -829,6 +837,16 @@ fn render_workspace_attach(
             tab.path.display(),
         )
         .map_err(AppError::WriteOutput)?;
+        if let Some(herdr_workspace_id) = elsewhere {
+            write!(
+                writer,
+                "  {}(Herdr {herdr_workspace_id}){}",
+                styles.dim(),
+                styles.reset()
+            )
+            .map_err(AppError::WriteOutput)?;
+        }
+        writeln!(writer).map_err(AppError::WriteOutput)?;
     }
     Ok(())
 }
@@ -1376,19 +1394,52 @@ mod tests {
 
     #[test]
     fn renders_workspace_attachment_as_a_compact_summary() {
-        let report = WorkspaceAttachReport {
-            workspace: "topic".to_owned(),
-            path: PathBuf::from("/workspaces/topic"),
+        let tab = |label: &str, path: &str, id: &str, status| AttachedTabReport {
+            label: label.to_owned(),
+            path: PathBuf::from(path),
+            herdr_tab_id: id.to_owned(),
+            status,
+        };
+        let descendant = |name: &str, herdr: &str, tab| WorkspaceAttachReport {
+            workspace: name.to_owned(),
+            path: PathBuf::from(format!("/workspaces/{name}")),
             parent: Some("project".to_owned()),
+            herdr_workspace_id: herdr.to_owned(),
+            status: AttachStatus::Created,
+            tabs: vec![tab],
+            warnings: Vec::new(),
+            descendants: Vec::new(),
+        };
+        let report = WorkspaceAttachReport {
+            workspace: "project".to_owned(),
+            path: PathBuf::from("/workspaces/project"),
+            parent: None,
             herdr_workspace_id: "w1".to_owned(),
             status: AttachStatus::Created,
-            tabs: vec![AttachedTabReport {
-                label: "2-🌲 topic".to_owned(),
-                path: PathBuf::from("/workspaces/topic"),
-                herdr_tab_id: "w1:t2".to_owned(),
-                status: AttachStatus::Created,
-            }],
+            tabs: vec![tab(
+                "1-main",
+                "/workspaces/project",
+                "w1:t1",
+                AttachStatus::Created,
+            )],
             warnings: Vec::new(),
+            descendants: vec![
+                descendant(
+                    "topic",
+                    "w1",
+                    tab(
+                        "2-topic",
+                        "/workspaces/topic",
+                        "w1:t2",
+                        AttachStatus::Created,
+                    ),
+                ),
+                descendant(
+                    "other",
+                    "w2",
+                    tab("1-main", "/workspaces/other", "w2:t1", AttachStatus::Reused),
+                ),
+            ],
         };
         let mut output = Vec::new();
 
@@ -1397,12 +1448,13 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             concat!(
-                "Workspace  topic\n",
-                "Path       /workspaces/topic\n",
-                "Parent     project\n",
+                "Workspace  project\n",
+                "Path       /workspaces/project\n",
                 "Herdr      w1\n",
                 "\n",
-                "  ✓ 2-🌲 topic  created  /workspaces/topic\n",
+                "  ✓ 1-main   created  /workspaces/project\n",
+                "  ✓ 2-topic  created  /workspaces/topic\n",
+                "  ✓ 1-main   reused   /workspaces/other  (Herdr w2)\n",
             )
         );
     }

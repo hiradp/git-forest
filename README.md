@@ -155,7 +155,7 @@ git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch 
 git forest list [--archived] [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
-git forest attach <workspace> [--json]
+git forest attach <workspace> [--children] [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
 git forest unarchive <workspace> [<checkout>...] [--archive <ID>] [--as <workspace>] [--symbol <symbol>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
@@ -473,8 +473,21 @@ current Herdr position.
 
 Attaching a parent opens only the parent. If a saved parent is not an active
 workspace, Forest prints a warning and ignores it; JSON reports carry the
-warning in `warnings`. Parents that form a cycle are
-rejected before Forest contacts Herdr.
+warning in `warnings`. Parents that form a cycle are rejected before Forest
+contacts Herdr.
+
+Pass `--children` to open a workspace and all of its descendants together:
+
+```sh
+git forest attach q4-storage --children
+```
+
+The workspace attaches by the rules above. Each descendant then opens as a tab
+in that same Herdr workspace, depth-first in name order. A descendant that is
+already open stays where it is, even in another Herdr workspace, because Herdr
+cannot move tabs between workspaces. Only the named workspace is focused.
+Forest checks every workspace in the tree before contacting Herdr. If Herdr
+fails partway, rerunning the command opens only what is missing.
 
 Forest records a fixed-length identifier derived from the canonical workspace
 path in Herdr's runtime metadata: on the Herdr workspace for a workspace opened
@@ -879,12 +892,15 @@ before an action could be selected. A branch created to track an explicit
       "status": "created"
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "descendants": []
 }
 ```
 
 `tabs` always holds the single attached tab. `parent` is the saved parent, or
-`null`. Workspace and tab status is one of `created`, `reused`, or `reconciled`.
+`null`. With `--children`, `descendants` lists a report of the same shape for
+each descendant in attach order; each carries its own `herdr_workspace_id`.
+Workspace and tab status is one of `created`, `reused`, or `reconciled`.
 
 ### Rename
 

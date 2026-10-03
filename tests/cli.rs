@@ -2001,6 +2001,7 @@ fn attaches_a_standalone_workspace_as_a_single_main_tab() {
     assert_eq!(report["workspace"], "topic");
     assert_eq!(report["path"], path(&fixture.workspace("topic")));
     assert_eq!(report["parent"], Value::Null);
+    assert_eq!(report["descendants"], serde_json::json!([]));
     assert_eq!(report["herdr_workspace_id"], "w-new");
     assert_eq!(report["status"], "created");
     assert_eq!(
@@ -2643,6 +2644,211 @@ fn recovers_a_child_tab_after_its_tagged_pane_is_closed() {
     assert!(herdr.calls().iter().any(|call| {
         call.starts_with("tab\tcreate\t--workspace\tw-project\t") && call.contains("\t4-slot\t")
     }));
+}
+
+fn create_attach_tree(fixture: &WorkspaceFixture) {
+    for arguments in [
+        vec!["create", "project"],
+        vec!["create", "topic", "--parent", "project"],
+        vec!["create", "slot", "--parent", "topic"],
+        vec!["create", "other", "--parent", "project"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+}
+
+#[test]
+fn attaches_a_workspace_and_its_descendants_in_one_herdr_workspace() {
+    let fixture = WorkspaceFixture::new();
+    create_attach_tree(&fixture);
+    let herdr = FakeHerdr::new(&fixture.root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .args(["attach", "project", "--children", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["herdr_workspace_id"], "w-new");
+    let descendants = report["descendants"].as_array().unwrap();
+    let names = descendants
+        .iter()
+        .map(|descendant| descendant["workspace"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["other", "topic", "slot"]);
+    assert!(
+        descendants
+            .iter()
+            .all(|descendant| descendant["herdr_workspace_id"] == "w-new")
+    );
+    let calls = herdr.calls();
+    let created = calls
+        .iter()
+        .filter(|call| call.starts_with("tab\tcreate\t--workspace\tw-new\t"))
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 3);
+    for (call, name) in created.iter().zip(["other", "topic", "slot"]) {
+        assert!(
+            call.contains(&format!("\t--cwd\t{}\t", fixture.workspace(name).display())),
+            "{call}"
+        );
+    }
+    for name in ["other", "topic", "slot"] {
+        assert!(calls.iter().any(|call| {
+            call.starts_with("pane\treport-metadata\t")
+                && call.ends_with(&format!(
+                    "git_forest_tab=workspace:{}",
+                    herdr_id(&fixture.workspace(name))
+                ))
+        }));
+    }
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.contains("\tfocus\t"))
+            .collect::<Vec<_>>(),
+        ["workspace\tfocus\tw-new", "tab\tfocus\tw-new:t-main"]
+    );
+}
+
+#[test]
+fn leaves_an_open_descendant_in_place_and_opens_new_ones_beside_the_root() {
+    let fixture = WorkspaceFixture::new();
+    create_attach_tree(&fixture);
+    let topic = fixture.workspace("topic");
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-other:t-topic", "label": "1-topic", "number": 1}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-other:p-topic", "workspace_id": "w-other", "tab_id": "w-other:t-topic", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&topic))}}
+    ]}});
+
+    let herdr = FakeHerdr::new(&fixture.root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .env("HERDR_TABS_RESPONSE", tabs.to_string())
+        .env("HERDR_PANES_RESPONSE", panes.to_string())
+        .args(["attach", "project", "--children", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let calls = herdr.calls();
+    assert!(!calls.iter().any(|call| {
+        call.starts_with("tab\tcreate") && call.contains(&format!("\t--cwd\t{}\t", topic.display()))
+    }));
+    assert!(calls.iter().any(|call| {
+        call.starts_with("tab\tcreate\t--workspace\tw-new\t")
+            && call.contains(&format!(
+                "\t--cwd\t{}\t",
+                fixture.workspace("slot").display()
+            ))
+    }));
+    assert!(!calls.contains(&"tab\tfocus\tw-other:t-topic".to_owned()));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let topic_report = report["descendants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|descendant| descendant["workspace"] == "topic")
+        .unwrap();
+    assert_eq!(topic_report["herdr_workspace_id"], "w-other");
+    assert_eq!(topic_report["status"], "reused");
+}
+
+#[test]
+fn checks_every_descendant_before_contacting_herdr() {
+    let fixture = WorkspaceFixture::new();
+    create_attach_tree(&fixture);
+    let slot_metadata = fixture.workspace("slot").join(".forest-workspace.toml");
+    fs::write(&slot_metadata, "parent = \"topic\"\nsymbol = \"\"\n").unwrap();
+    let herdr = FakeHerdr::new(&fixture.root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .args(["attach", "project", "--children", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(message.contains(path(&slot_metadata)), "{message}");
+    assert!(!herdr.log.exists());
+
+    fs::write(&slot_metadata, "parent = \"topic\"\n").unwrap();
+    let renamed = fixture.workspace("topic notes");
+    fs::create_dir(&renamed).unwrap();
+    fs::write(
+        renamed.join(".forest-workspace.toml"),
+        "parent = \"project\"\n",
+    )
+    .unwrap();
+
+    let output = herdr
+        .command(&fixture.root)
+        .args(["attach", "project", "--children", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(!herdr.log.exists());
+}
+
+#[test]
+fn rerunning_attach_children_opens_only_what_is_missing() {
+    let fixture = WorkspaceFixture::new();
+    create_attach_tree(&fixture);
+    let workspaces = serde_json::json!({"result": {"workspaces": [
+        {"workspace_id": "w-root", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}}
+    ]}});
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-root:t-main", "label": "1-main", "number": 1},
+        {"tab_id": "w-root:t-other", "label": "2-other", "number": 2}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-root:p-main", "workspace_id": "w-root", "tab_id": "w-root:t-main", "tokens": {"git_forest_tab": "main"}},
+        {"pane_id": "w-root:p-other", "workspace_id": "w-root", "tab_id": "w-root:t-other", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&fixture.workspace("other")))}}
+    ]}});
+    let herdr = FakeHerdr::new(&fixture.root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
+        .env("HERDR_TABS_RESPONSE", tabs.to_string())
+        .env("HERDR_PANES_RESPONSE", panes.to_string())
+        .args(["attach", "project", "--children", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let calls = herdr.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("workspace\tcreate"))
+    );
+    let created = calls
+        .iter()
+        .filter(|call| call.starts_with("tab\tcreate\t--workspace\tw-root\t"))
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 2);
+    for (call, name) in created.iter().zip(["topic", "slot"]) {
+        assert!(
+            call.contains(&format!("\t--cwd\t{}\t", fixture.workspace(name).display())),
+            "{call}"
+        );
+    }
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.contains("\tfocus\t"))
+            .collect::<Vec<_>>(),
+        ["workspace\tfocus\tw-root", "tab\tfocus\tw-root:t-main"]
+    );
 }
 
 #[test]

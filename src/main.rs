@@ -94,6 +94,7 @@ fn run_launcher(config: &Config) -> Result<u8> {
             execute(
                 &Command::Attach(AttachArgs {
                     workspace,
+                    children: false,
                     output: OutputArgs { json: false },
                 }),
                 config,
@@ -123,6 +124,7 @@ fn run_launcher(config: &Config) -> Result<u8> {
             execute(
                 &Command::Attach(AttachArgs {
                     workspace: workspace.clone(),
+                    children: false,
                     output: OutputArgs { json: false },
                 }),
                 config,

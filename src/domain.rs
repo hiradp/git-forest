@@ -235,6 +235,7 @@ pub struct WorkspaceAttachReport {
     pub status: AttachStatus,
     pub tabs: Vec<AttachedTabReport>,
     pub warnings: Vec<String>,
+    pub descendants: Vec<WorkspaceAttachReport>,
 }
 
 #[derive(Debug, Serialize)]
