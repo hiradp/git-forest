@@ -150,7 +150,7 @@ git forest setup [--json]
 git forest repos [--json]
 git forest fetch [<repository>...] [--jobs <N>] [--json]
 git forest update [<repository>...] [--jobs <N>] [--json]
-git forest create <workspace> [<checkout>...] [--symbol <symbol>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
+git forest create <workspace> [<checkout>...] [--symbol <symbol>] [--parent <workspace>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
 git forest list [--archived] [--json]
 git forest status [<workspace>] [--json]
@@ -297,15 +297,41 @@ git forest attach logical-slots
 # Herdr workspace name: 🌲 logical-slots
 ```
 
-The symbol is stored in the optional workspace-local `.forest-symbol` file.
-Directory names, branch names, and JSON workspace identifiers stay unchanged.
-Symbols may include composed emoji, but must not contain whitespace or control
-characters. To set or change a symbol on an existing workspace, repeat `create`
-with `--symbol`; omitting it preserves the saved symbol. Symbols survive rename,
-archive, and unarchive. `unarchive --symbol` overrides the saved symbol.
-Trailing whitespace in `.forest-symbol` is ignored when reading it; an empty or
-otherwise invalid symbol is reported with the file path. The file appears in
+Record a parent workspace with `--parent` to group related workspaces, such as
+a coordination workspace and the workspaces that implement its parts:
+
+```sh
+git forest create q4-storage --symbol "🗺"
+git forest create logical-slots api --parent q4-storage
+git forest create slot-tests api@tests --parent logical-slots
+```
+
+The parent must be an active workspace, and Forest rejects a parent that would
+form a cycle. Links can be any depth. Directories stay side by side under the
+workspaces root; the link is metadata only.
+
+Symbols and parents are stored in the optional workspace-local
+`.forest-workspace.toml` file:
+
+```toml
+symbol = "🌲"
+parent = "q4-storage"
+```
+
+Both fields are optional. The file is authoritative and can be edited by hand;
+Forest reads it on every command. Directory names, branch names, and JSON
+workspace identifiers stay unchanged. Symbols may include composed emoji, but
+must not contain whitespace or control characters. To set or change a symbol or
+parent on an existing workspace, repeat `create` with `--symbol` or `--parent`;
+omitting an option preserves the saved value. When Forest writes the file, it
+keeps other keys but not comments. Metadata survives rename, archive, and
+unarchive. `unarchive --symbol` and `unarchive --parent` override the saved
+values. An invalid file is reported with its path. The file appears in
 workspace entries like other workspace-local files.
+
+Workspaces created by earlier versions may have a `.forest-symbol` file instead.
+Forest still reads it, ignoring trailing whitespace, and replaces it with
+`.forest-workspace.toml` the next time it writes metadata for that workspace.
 
 Before mutation, every requested checkout is checked for:
 
@@ -382,6 +408,9 @@ and layout mismatches. Workspace-local entries are direct children that are not
 configured checkout paths; they are supported and do not make the workspace
 inconsistent. The JSON field remains `unexpected_entries` for compatibility.
 
+Human output nests each workspace under its parent. JSON keeps a flat list and
+reports each workspace's saved `parent`, or `null`.
+
 `list --archived` shows saved archives instead of active workspaces, with each
 archive's workspace, human-readable date, ID, and path.
 Legacy archives show `legacy` instead of a date. Use the ID with
@@ -413,42 +442,65 @@ Opens an existing Forest workspace in Herdr. The `herdr` executable must be on
 `PATH`, and a Herdr server for the current session must already be running.
 Forest never starts or stops the server.
 
-The layout is intentionally fixed. It contains one shell pane per tab and does
-not start commands:
+A workspace opens as a single tab with one shell pane rooted in the workspace
+directory. Forest does not start commands. Where the tab goes depends on where
+`attach` runs:
 
-- on initial attachment, `1-main` starts in the Forest workspace root;
-- each present, registered checkout gets a tab rooted in its worktree;
-- checkout tabs are initially created in repository configuration order, with
-  the primary checkout before named slots;
-- each managed tab's numeric prefix matches its current Herdr tab position,
-  such as `2-api` and `3-operator`.
+1. If the workspace is already open anywhere, as its own Herdr workspace or as
+   a tab, Forest focuses it and never opens a second copy.
+2. Otherwise, if the Herdr workspace that `attach` runs in has the workspace's
+   parent open, either as that Herdr workspace or as one of its tabs, Forest
+   adds a tab there. This applies from any tab in that Herdr workspace.
+3. Otherwise, Forest creates a Herdr workspace whose only tab is `1-main`.
 
-When a workspace has a saved symbol, Forest prefixes its Herdr name with the
-symbol and a space, and updates that name on subsequent attachments. Without a
+Forest identifies the Herdr workspace that `attach` runs in from
+`HERDR_WORKSPACE_ID`, which Herdr sets in its panes. Outside Herdr, the third
+rule always applies.
+
+```text
+Herdr: 🗺 q4-storage
+  1-main
+  2-🌲 logical-slots
+  3-slot-tests
+```
+
+A child tab is labeled with its position, the workspace's symbol if it has one,
+and its name, such as `2-🌲 logical-slots`. A workspace opened as its own Herdr
+workspace is named with its symbol and a space before its name. Without a
 symbol, new Herdr workspaces use the plain workspace name and existing Herdr
-names are left alone.
+names are left alone. Each attachment repairs the tab's numeric prefix from its
+current Herdr position.
 
-Forest records the canonical workspace path in Herdr's runtime metadata. A
-later attachment with one matching Herdr workspace reuses it, creates missing
-managed tabs at the end, repairs managed tab names from their current Herdr tab
-positions, and focuses the managed main tab. Existing managed and unmanaged
-tabs retain their positions, and additional panes are preserved. Multiple
-matches are rejected rather than guessed.
+Attaching a parent opens only the parent. If a saved parent is not an active
+workspace, Forest prints a warning and ignores it; JSON reports carry the
+warning in `warnings`. Parents that form a cycle are
+rejected before Forest contacts Herdr.
+
+Forest records a fixed-length identifier derived from the canonical workspace
+path in Herdr's runtime metadata: on the Herdr workspace for a workspace opened
+on its own, and on the tab's pane for a child tab. Herdr truncates metadata
+values to 80 bytes, so Forest does not store the path itself. Herdr workspaces
+tagged with the full path by earlier versions are still recognized when the
+path fit, and Forest adds the new identifier the first time it sees one. Tabs
+and panes Forest did not create keep their positions. Herdr workspaces created
+by earlier versions with one tab per checkout are reused;
+their checkout tabs are left open and are no longer managed. Multiple matches
+are rejected rather than guessed.
 
 Attachment does not create worktrees or otherwise change Git state. A workspace
-with inconsistent configured worktrees is rejected. Removing a Forest
-workspace does not close its Herdr workspace or processes.
+with inconsistent configured worktrees or invalid metadata is rejected.
+Removing a Forest workspace does not close its Herdr workspace, tabs, or
+processes.
 
-Human output summarizes the Herdr workspace and each managed tab:
+Human output summarizes the attached tab:
 
 ```text
 Workspace  logical-slots
 Path       /project/src/.workspaces/logical-slots
+Parent     q4-storage
 Herdr      w1
 
-  ✓ 1-main      created  /project/src/.workspaces/logical-slots
-  ✓ 2-api       created  /project/src/.workspaces/logical-slots/api
-  ✓ 3-operator  created  /project/src/.workspaces/logical-slots/operator
+  ✓ 2-🌲 logical-slots  created  /project/src/.workspaces/logical-slots
 ```
 
 ### `rename`
@@ -479,6 +531,11 @@ recognizes that partial state and resumes repair. Forest does not update Herdr
 runtime metadata, so a later `attach` under the new name may create a new Herdr
 workspace rather than reuse one attached before the rename.
 
+Before moving anything, Forest updates `parent` in every active workspace that
+names the old workspace as its parent, and restores those links if the
+directory move fails. A resumed rename updates any children that still name the
+old workspace.
+
 ### `archive`
 
 Archives an entire workspace while preserving workspace-local files and
@@ -500,8 +557,11 @@ directories use ID `legacy`; `.generations` keeps timestamp-looking legacy names
 unambiguous without a manifest or database. Within each workspace, archives sort
 by actual instant and numeric suffix, with `legacy` first.
 
-Dirty worktrees, unregistered checkout paths, layout mismatches, or a missing
-workspace directory prevent archival. Passing `--force` removes dirty worktrees
+Dirty worktrees, unregistered checkout paths, layout mismatches, a missing
+workspace directory, or active child workspaces prevent archival. Archive or
+delete the children first, or point them at another parent. When the interactive
+launcher retires several selected workspaces, it retires children before their
+parents. Passing `--force` removes dirty worktrees
 anyway, discarding their modified, untracked, and ignored files; all other
 conflicts still prevent archival. Workspace-local entries do not. A Git failure
 can leave a partially removed active workspace, and repeating the command safely
@@ -544,8 +604,9 @@ rejected before reconciliation. Invalid IDs and ambiguous selections return
 
 Permanently deletes a workspace. Forest first applies the same complete-workspace
 preflight and worktree removal as `archive`, preserving branches and refusing
-dirty or unregistered worktrees. It stages the remaining workspace-local files at
-`.archive/.deleting/<workspace>`, then permanently removes them. Pending deletions
+dirty or unregistered worktrees and workspaces with active children. It stages
+the remaining workspace-local files at `.archive/.deleting/<workspace>`, then
+permanently removes them. Pending deletions
 are excluded from archive discovery and cannot be restored with `unarchive`.
 Pass `--force` to discard modified, untracked, or ignored files in registered
 worktrees as well.
@@ -593,12 +654,13 @@ Removal is deliberately conservative:
 - removal always uses `git worktree remove`, including to clean up registered
   worktrees whose paths are already missing;
 - branches are never deleted;
-- the workspace directory is removed only when it is empty;
+- the workspace directory is removed only when it is empty and no active
+  workspace names it as a parent;
 - workspace-local entries are reported and preserved.
 
-A saved `.forest-symbol` is preserved too, so `remove` leaves the workspace
-directory in place even after its last checkout is removed. Use `delete` to
-remove the workspace and its local files.
+A saved `.forest-workspace.toml` is preserved too, so `remove` leaves the
+workspace directory in place even after its last checkout is removed. Use
+`delete` to remove the workspace and its local files.
 
 Removing only named checkout identifiers leaves other worktrees in place.
 `remove stacked api@part-2` removes only that named checkout; `api` continues
@@ -719,6 +781,7 @@ before an action could be selected. A branch created to track an explicit
       "name": "logical-slots",
       "path": "/project/src/.workspaces/logical-slots",
       "exists": true,
+      "parent": "q4-storage",
       "repositories": [
         {
           "name": "api",
@@ -764,6 +827,7 @@ before an action could be selected. A branch created to track an explicit
       "name": "logical-slots",
       "path": "/project/src/.workspaces/logical-slots",
       "exists": true,
+      "parent": "q4-storage",
       "repositories": [
         {
           "name": "api",
@@ -804,26 +868,23 @@ before an action could be selected. A branch created to track an explicit
 {
   "workspace": "logical-slots",
   "path": "/project/src/.workspaces/logical-slots",
+  "parent": "q4-storage",
   "herdr_workspace_id": "w1",
   "status": "created",
   "tabs": [
     {
-      "label": "1-main",
+      "label": "2-🌲 logical-slots",
       "path": "/project/src/.workspaces/logical-slots",
-      "herdr_tab_id": "w1:t1",
-      "status": "created"
-    },
-    {
-      "label": "2-api",
-      "path": "/project/src/.workspaces/logical-slots/api",
       "herdr_tab_id": "w1:t2",
       "status": "created"
     }
-  ]
+  ],
+  "warnings": []
 }
 ```
 
-Workspace and tab status is one of `created`, `reused`, or `reconciled`.
+`tabs` always holds the single attached tab. `parent` is the saved parent, or
+`null`. Workspace and tab status is one of `created`, `reused`, or `reconciled`.
 
 ### Rename
 

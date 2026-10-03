@@ -33,6 +33,12 @@ impl Styles {
         }
     }
 
+    fn stderr() -> Self {
+        Self {
+            enabled: io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+        }
+    }
+
     fn code(self, code: &'static str) -> &'static str {
         if self.enabled { code } else { "" }
     }
@@ -93,6 +99,25 @@ pub fn render_error_message(message: &str, exit_code: u8) -> Result<()> {
     writeln!(writer).map_err(AppError::WriteOutput)
 }
 
+fn render_warnings(warnings: &[String]) -> Result<()> {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    let styles = Styles::stderr();
+    let stderr = io::stderr();
+    let mut writer = stderr.lock();
+    for warning in warnings {
+        writeln!(
+            writer,
+            "{}warning:{} {warning}",
+            styles.yellow(),
+            styles.reset()
+        )
+        .map_err(AppError::WriteOutput)?;
+    }
+    Ok(())
+}
+
 pub fn render_blank_line() -> Result<()> {
     let stdout = io::stdout();
     writeln!(stdout.lock()).map_err(AppError::WriteOutput)
@@ -150,11 +175,18 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
                 )
                 .map_err(AppError::WriteOutput);
             }
-            for (index, workspace) in report.workspaces.iter().enumerate() {
+            let order = tree_order(
+                &report.workspaces,
+                |workspace| &workspace.name,
+                |workspace| workspace.parent.as_deref(),
+            );
+            for (index, (depth, workspace)) in order.into_iter().enumerate() {
                 if index > 0 {
                     writeln!(writer).map_err(AppError::WriteOutput)?;
                 }
-                render_workspace_list(&mut writer, workspace, styles)?;
+                render_indented(&mut writer, depth, |writer| {
+                    render_workspace_list(writer, workspace, styles)
+                })?;
             }
             Ok(())
         }
@@ -188,11 +220,18 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
                 )
                 .map_err(AppError::WriteOutput);
             }
-            for (index, workspace) in report.workspaces.iter().enumerate() {
+            let order = tree_order(
+                &report.workspaces,
+                |workspace| &workspace.name,
+                |workspace| workspace.parent.as_deref(),
+            );
+            for (index, (depth, workspace)) in order.into_iter().enumerate() {
                 if index > 0 {
                     writeln!(writer).map_err(AppError::WriteOutput)?;
                 }
-                render_workspace_status(&mut writer, workspace, styles)?;
+                render_indented(&mut writer, depth, |writer| {
+                    render_workspace_status(writer, workspace, styles)
+                })?;
             }
             Ok(())
         }
@@ -200,6 +239,7 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             writeln!(writer, "{}", report.path.display()).map_err(AppError::WriteOutput)
         }
         CommandReport::WorkspaceAttach(report) => {
+            render_warnings(&report.warnings)?;
             render_workspace_attach(&mut writer, report, styles)
         }
         CommandReport::WorkspaceRename(report) => {
@@ -442,6 +482,7 @@ fn render_workspace_change(
         &report.workspace,
         report.path.display(),
         common_branch,
+        None,
         styles,
     )?;
 
@@ -521,6 +562,7 @@ fn render_workspace_list(
         &workspace.name,
         workspace.path.display(),
         None,
+        workspace.parent.as_deref(),
         styles,
     )?;
 
@@ -604,6 +646,7 @@ fn render_workspace_status(
         &workspace.name,
         workspace.path.display(),
         None,
+        workspace.parent.as_deref(),
         styles,
     )?;
 
@@ -747,6 +790,9 @@ fn render_workspace_attach(
         styles,
     )?;
     render_header_field(writer, "Path", report.path.display(), "", styles)?;
+    if let Some(parent) = &report.parent {
+        render_header_field(writer, "Parent", parent, "", styles)?;
+    }
     render_header_field(
         writer,
         "Herdr",
@@ -924,6 +970,7 @@ fn render_workspace_delete(
         &report.workspace,
         report.path.display(),
         None,
+        None,
         styles,
     )?;
     render_repository_removals(writer, &report.repositories, styles)?;
@@ -1019,6 +1066,7 @@ fn render_workspace_removal(
         &report.workspace,
         report.path.display(),
         None,
+        None,
         styles,
     )?;
 
@@ -1085,6 +1133,7 @@ fn render_workspace_header(
     workspace: &str,
     path: impl std::fmt::Display,
     branch: Option<&str>,
+    parent: Option<&str>,
     styles: Styles,
 ) -> Result<()> {
     render_header_field(writer, "Workspace", workspace, styles.bold(), styles)?;
@@ -1092,7 +1141,82 @@ fn render_workspace_header(
     if let Some(branch) = branch {
         render_header_field(writer, "Branch", branch, styles.cyan(), styles)?;
     }
+    if let Some(parent) = parent {
+        render_header_field(writer, "Parent", parent, "", styles)?;
+    }
     writeln!(writer).map_err(AppError::WriteOutput)
+}
+
+/// Orders entries depth-first under their parents. Entries whose parent is
+/// not listed, or whose parents form a cycle, are treated as roots.
+fn tree_order<T>(
+    entries: &[T],
+    name: impl Fn(&T) -> &str,
+    parent: impl Fn(&T) -> Option<&str>,
+) -> Vec<(usize, &T)> {
+    fn visit<'a, T>(
+        index: usize,
+        depth: usize,
+        entries: &'a [T],
+        children: &[Vec<usize>],
+        visited: &mut [bool],
+        order: &mut Vec<(usize, &'a T)>,
+    ) {
+        if std::mem::replace(&mut visited[index], true) {
+            return;
+        }
+        order.push((depth, &entries[index]));
+        for &child in &children[index] {
+            visit(child, depth + 1, entries, children, visited, order);
+        }
+    }
+
+    let parent_index = entries
+        .iter()
+        .map(|entry| {
+            parent(entry).and_then(|parent| {
+                entries
+                    .iter()
+                    .position(|candidate| name(candidate) == parent)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut children = vec![Vec::new(); entries.len()];
+    for (index, parent) in parent_index.iter().enumerate() {
+        if let Some(parent) = parent {
+            children[*parent].push(index);
+        }
+    }
+    let mut visited = vec![false; entries.len()];
+    let mut order = Vec::with_capacity(entries.len());
+    for (index, parent) in parent_index.iter().enumerate() {
+        if parent.is_none() {
+            visit(index, 0, entries, &children, &mut visited, &mut order);
+        }
+    }
+    for index in 0..entries.len() {
+        visit(index, 0, entries, &children, &mut visited, &mut order);
+    }
+    order
+}
+
+fn render_indented(
+    writer: &mut impl Write,
+    depth: usize,
+    render: impl FnOnce(&mut Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    let mut buffer = Vec::new();
+    render(&mut buffer)?;
+    let indent = "    ".repeat(depth);
+    for line in buffer.split_inclusive(|byte| *byte == b'\n') {
+        if line != b"\n" {
+            writer
+                .write_all(indent.as_bytes())
+                .map_err(AppError::WriteOutput)?;
+        }
+        writer.write_all(line).map_err(AppError::WriteOutput)?;
+    }
+    Ok(())
 }
 
 fn render_header_field(
@@ -1255,22 +1379,16 @@ mod tests {
         let report = WorkspaceAttachReport {
             workspace: "topic".to_owned(),
             path: PathBuf::from("/workspaces/topic"),
+            parent: Some("project".to_owned()),
             herdr_workspace_id: "w1".to_owned(),
-            status: AttachStatus::Reconciled,
-            tabs: vec![
-                AttachedTabReport {
-                    label: "1-main".to_owned(),
-                    path: PathBuf::from("/workspaces/topic"),
-                    herdr_tab_id: "w1:t1".to_owned(),
-                    status: AttachStatus::Reused,
-                },
-                AttachedTabReport {
-                    label: "2-alpha".to_owned(),
-                    path: PathBuf::from("/workspaces/topic/alpha"),
-                    herdr_tab_id: "w1:t2".to_owned(),
-                    status: AttachStatus::Reconciled,
-                },
-            ],
+            status: AttachStatus::Created,
+            tabs: vec![AttachedTabReport {
+                label: "2-🌲 topic".to_owned(),
+                path: PathBuf::from("/workspaces/topic"),
+                herdr_tab_id: "w1:t2".to_owned(),
+                status: AttachStatus::Created,
+            }],
+            warnings: Vec::new(),
         };
         let mut output = Vec::new();
 
@@ -1281,11 +1399,40 @@ mod tests {
             concat!(
                 "Workspace  topic\n",
                 "Path       /workspaces/topic\n",
+                "Parent     project\n",
                 "Herdr      w1\n",
                 "\n",
-                "  ✓ 1-main   reused      /workspaces/topic\n",
-                "  ✓ 2-alpha  reconciled  /workspaces/topic/alpha\n",
+                "  ✓ 2-🌲 topic  created  /workspaces/topic\n",
             )
+        );
+    }
+
+    #[test]
+    fn orders_workspaces_under_parents_and_survives_cycles() {
+        let entries = [
+            ("orphan", Some("missing")),
+            ("child", Some("root")),
+            ("loop-a", Some("loop-b")),
+            ("root", None),
+            ("grandchild", Some("child")),
+            ("loop-b", Some("loop-a")),
+        ];
+
+        let order = tree_order(&entries, |entry| entry.0, |entry| entry.1)
+            .into_iter()
+            .map(|(depth, entry)| (depth, entry.0))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            order,
+            [
+                (0, "orphan"),
+                (0, "root"),
+                (1, "child"),
+                (2, "grandchild"),
+                (0, "loop-a"),
+                (1, "loop-b"),
+            ]
         );
     }
 

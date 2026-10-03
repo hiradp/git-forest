@@ -9,8 +9,12 @@ use serde::de::DeserializeOwned;
 use crate::error::{AppError, Result};
 use crate::git::REPOSITORY_ENVIRONMENT;
 
+/// Full canonical path, written by earlier versions. Herdr truncates token
+/// values to 80 bytes, so only short paths survive intact.
 pub const WORKSPACE_PATH_TOKEN: &str = "git_forest_path";
+pub const WORKSPACE_ID_TOKEN: &str = "git_forest_id";
 pub const TAB_TOKEN: &str = "git_forest_tab";
+const CURRENT_WORKSPACE_VARIABLE: &str = "HERDR_WORKSPACE_ID";
 
 const METADATA_SOURCE: &str = "git-forest";
 
@@ -38,6 +42,8 @@ pub struct HerdrTab {
 pub struct HerdrPane {
     #[serde(rename = "pane_id")]
     pub id: String,
+    #[serde(default)]
+    pub workspace_id: String,
     pub tab_id: String,
     pub cwd: Option<PathBuf>,
     #[serde(default)]
@@ -126,7 +132,7 @@ impl Herdr {
         )
     }
 
-    pub fn report_workspace_path(&self, workspace_id: &str, path: &str) -> Result<()> {
+    pub fn report_workspace_id(&self, workspace_id: &str, id: &str) -> Result<()> {
         self.request_value(
             "could not identify a Herdr workspace",
             [
@@ -136,7 +142,7 @@ impl Herdr {
                 OsString::from("--source"),
                 OsString::from(METADATA_SOURCE),
                 OsString::from("--token"),
-                token(WORKSPACE_PATH_TOKEN, path),
+                token(WORKSPACE_ID_TOKEN, id),
             ],
         )
     }
@@ -152,6 +158,11 @@ impl Herdr {
             ],
         )
         .map(|result: TabListResult| result.tabs)
+    }
+
+    pub fn all_tabs(&self) -> Result<Vec<HerdrTab>> {
+        self.request("could not list Herdr tabs", ["tab", "list"])
+            .map(|result: TabListResult| result.tabs)
     }
 
     pub fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<CreatedTab> {
@@ -209,6 +220,17 @@ impl Herdr {
             ],
         )
         .map(|result: PaneListResult| result.panes)
+    }
+
+    pub fn all_panes(&self) -> Result<Vec<HerdrPane>> {
+        self.request("could not list Herdr panes", ["pane", "list"])
+            .map(|result: PaneListResult| result.panes)
+    }
+
+    pub fn current_workspace_id(&self) -> Option<String> {
+        std::env::var(CURRENT_WORKSPACE_VARIABLE)
+            .ok()
+            .filter(|id| !id.is_empty())
     }
 
     pub fn report_tab_role(&self, pane_id: &str, role: &str) -> Result<()> {
@@ -279,6 +301,15 @@ impl Herdr {
         }
         Ok(output)
     }
+}
+
+/// A fixed-length identifier for a canonical workspace path that fits within
+/// Herdr's token value limit. FNV-1a is stable across Rust releases.
+pub fn workspace_id(path: &str) -> String {
+    let hash = path.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 fn token(name: &str, value: &str) -> OsString {

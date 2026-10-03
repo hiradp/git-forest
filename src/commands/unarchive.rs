@@ -75,8 +75,16 @@ pub fn run(config: &Config, git: &Git, arguments: &UnarchiveArgs) -> Result<Comm
     }
 
     if let Some(selected) = selected {
-        if let Some(symbol) = arguments.creation.symbol.as_deref() {
-            workspace::prepare_symbol(&selected.path, symbol)?;
+        workspace::prepare_metadata(
+            &selected.path,
+            arguments.creation.symbol.as_deref(),
+            arguments.creation.parent.as_deref(),
+        )?;
+        // A restored name can sit in its saved parent's chain, as with `--as`.
+        if arguments.creation.parent.is_none()
+            && let Some(parent) = workspace::saved_parent(&selected.path)
+        {
+            create::validate_parent(config, git, destination, &parent, false)?;
         }
         if !archive::rename_is_supported()
             || !archive::same_filesystem(&selected.path, &config.workspaces_root)?
@@ -123,6 +131,7 @@ pub fn run(config: &Config, git: &Git, arguments: &UnarchiveArgs) -> Result<Comm
     let creation = CreateArgs {
         workspace: destination.to_owned(),
         symbol: arguments.creation.symbol.clone(),
+        parent: arguments.creation.parent.clone(),
         checkouts: arguments.creation.checkouts.clone(),
         bases: arguments.creation.bases.clone(),
         branches: arguments.creation.branches.clone(),

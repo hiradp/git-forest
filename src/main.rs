@@ -107,6 +107,7 @@ fn run_launcher(config: &Config) -> Result<u8> {
                 &Command::Create(CreateArgs {
                     workspace: workspace.clone(),
                     symbol: None,
+                    parent: None,
                     checkouts,
                     bases: Vec::new(),
                     branches: Vec::new(),
@@ -132,25 +133,42 @@ fn run_launcher(config: &Config) -> Result<u8> {
                 ))
             })
         }
-        launcher::Outcome::Action(launcher::Action::Archive { workspaces, force }) => {
-            execute_many(config, workspaces, |workspace| {
+        launcher::Outcome::Action(launcher::Action::Archive { workspaces, force }) => execute_many(
+            config,
+            descendants_first(config, workspaces)?,
+            |workspace| {
                 Command::Archive(ArchiveArgs {
                     workspace,
                     force,
                     output: OutputArgs { json: false },
                 })
-            })
-        }
-        launcher::Outcome::Action(launcher::Action::Delete { workspaces, force }) => {
-            execute_many(config, workspaces, |workspace| {
+            },
+        ),
+        launcher::Outcome::Action(launcher::Action::Delete { workspaces, force }) => execute_many(
+            config,
+            descendants_first(config, workspaces)?,
+            |workspace| {
                 Command::Delete(DeleteArgs {
                     workspace,
                     force,
                     output: OutputArgs { json: false },
                 })
-            })
-        }
+            },
+        ),
     }
+}
+
+/// Retirement refuses workspaces with active children, so a selection that
+/// includes a parent and its children must retire the children first.
+fn descendants_first(config: &Config, mut workspaces: Vec<String>) -> Result<Vec<String>> {
+    let states = workspace::scan(config, &Git)?;
+    let depth = |name: &str| match workspace::ancestry(&states, name) {
+        workspace::Ancestry::Linked(ancestors)
+        | workspace::Ancestry::MissingParent { ancestors, .. } => ancestors.len(),
+        workspace::Ancestry::Cycle(_) => 0,
+    };
+    workspaces.sort_by_cached_key(|name| std::cmp::Reverse(depth(name)));
+    Ok(workspaces)
 }
 
 fn execute_many(

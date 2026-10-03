@@ -125,7 +125,15 @@ pub fn run(config: &Config, git: &Git, arguments: &RenameArgs) -> Result<Command
         }
     };
 
+    // Relink children before moving anything so that every interruption leaves
+    // a state the same command can resume.
+    let children = workspace::children(&states, &arguments.workspace)
+        .map(|child| child.path.clone())
+        .collect::<Vec<_>>();
+    relink(&children, &arguments.workspace, &arguments.new_workspace)?;
+
     if move_directory && let Err(source) = rename_without_replacing(&old_path, &path) {
+        relink(&children, &arguments.new_workspace, &arguments.workspace)?;
         let repositories = plans
             .into_iter()
             .map(|plan| rename_report(plan, RenameStatus::NotRun, None))
@@ -192,7 +200,6 @@ pub fn run(config: &Config, git: &Git, arguments: &RenameArgs) -> Result<Command
             });
         failed = old_registrations_remain || !destination_is_consistent;
     }
-
     let (status, message) = if failed {
         (
             WorkspaceRenameStatus::Failed,
@@ -219,6 +226,24 @@ pub fn run(config: &Config, git: &Git, arguments: &RenameArgs) -> Result<Command
         }),
         exit_code: u8::from(failed),
     })
+}
+
+/// Points every child at `to`, leaving all of them at `from` on failure.
+fn relink(children: &[PathBuf], from: &str, to: &str) -> Result<()> {
+    for child in children {
+        workspace::prepare_metadata(child, None, Some(to))?;
+    }
+    for (index, child) in children.iter().enumerate() {
+        if let Err(error) = workspace::update_metadata(child, None, Some(to)) {
+            // The failing write may have committed before its cleanup failed.
+            for written in &children[..=index] {
+                // Best effort; the original error explains the failure.
+                let _ = workspace::update_metadata(written, None, Some(from));
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn initial_plans(

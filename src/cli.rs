@@ -197,6 +197,10 @@ pub struct CreateArgs {
     #[arg(long, value_name = "SYMBOL")]
     pub symbol: Option<String>,
 
+    /// Existing workspace to record as this workspace's parent
+    #[arg(long, value_name = "WORKSPACE", add = ArgValueCompleter::new(completion::workspaces))]
+    pub parent: Option<String>,
+
     /// Configured repository checkouts in REPOSITORY[@SLOT] form; omit to create no checkouts
     #[arg(add = ArgValueCompleter::new(completion::checkouts))]
     pub checkouts: Vec<CheckoutId>,

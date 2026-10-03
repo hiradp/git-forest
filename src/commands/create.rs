@@ -10,11 +10,13 @@ use crate::domain::{
 };
 use crate::error::{AppError, Result};
 use crate::git::{Git, branch_names_conflict, branch_names_equal, failure_message};
+use crate::workspace::Ancestry;
 
 #[derive(Debug, Clone, Copy)]
 struct Arguments<'a> {
     workspace: &'a str,
     symbol: Option<&'a str>,
+    parent: Option<&'a str>,
     checkouts: &'a [CheckoutId],
     bases: &'a [BaseOverride],
     branches: &'a [BranchOverride],
@@ -25,6 +27,7 @@ impl<'a> From<&'a CreateArgs> for Arguments<'a> {
         Self {
             workspace: &arguments.workspace,
             symbol: arguments.symbol.as_deref(),
+            parent: arguments.parent.as_deref(),
             checkouts: &arguments.checkouts,
             bases: &arguments.bases,
             branches: &arguments.branches,
@@ -37,6 +40,7 @@ impl<'a> From<&'a AddArgs> for Arguments<'a> {
         Self {
             workspace: &arguments.workspace,
             symbol: None,
+            parent: None,
             checkouts: &arguments.checkouts,
             bases: &arguments.bases,
             branches: &arguments.branches,
@@ -116,6 +120,7 @@ fn path_occupied(path: &Path) -> Result<bool> {
 pub(crate) struct CreationPlan {
     workspace: String,
     symbol: Option<String>,
+    parent: Option<String>,
     path: PathBuf,
     plans: Vec<Plan>,
 }
@@ -159,8 +164,9 @@ fn prepare(
             workspace_path.display()
         )));
     }
-    if let Some(symbol) = arguments.symbol {
-        crate::workspace::prepare_symbol(&workspace_path, symbol)?;
+    crate::workspace::prepare_metadata(&workspace_path, arguments.symbol, arguments.parent)?;
+    if let Some(parent) = arguments.parent {
+        validate_parent(config, git, arguments.workspace, parent, true)?;
     }
     if require_existing_workspace && !workspace_path.is_dir() {
         return Err(AppError::Operational(format!(
@@ -243,6 +249,7 @@ fn prepare(
     Ok(Preparation::Ready(CreationPlan {
         workspace: arguments.workspace.to_owned(),
         symbol: arguments.symbol.map(str::to_owned),
+        parent: arguments.parent.map(str::to_owned),
         path: workspace_path,
         plans,
     }))
@@ -252,6 +259,7 @@ pub(crate) fn apply(git: &Git, plan: CreationPlan) -> Result<CommandOutcome> {
     let CreationPlan {
         workspace,
         symbol,
+        parent,
         path: workspace_path,
         plans,
     } = plan;
@@ -269,9 +277,7 @@ pub(crate) fn apply(git: &Git, plan: CreationPlan) -> Result<CommandOutcome> {
         })?;
     }
 
-    if let Some(symbol) = symbol {
-        crate::workspace::write_symbol(&workspace_path, &symbol)?;
-    }
+    crate::workspace::update_metadata(&workspace_path, symbol.as_deref(), parent.as_deref())?;
 
     let mut failed = false;
     let mut repositories = Vec::with_capacity(plans.len());
@@ -401,6 +407,65 @@ fn apply_planned_branch_conflicts(preflight: &mut [Preflight]) {
             *item = replacement;
         }
     }
+}
+
+/// Rejects a parent that is `workspace` itself or descends from it. A requested
+/// parent must also be active; a saved one may be missing.
+pub(crate) fn validate_parent(
+    config: &Config,
+    git: &Git,
+    workspace: &str,
+    parent: &str,
+    require_active: bool,
+) -> Result<()> {
+    // Names differing only in case share a directory on case-insensitive
+    // filesystems.
+    let same_workspace = |name: &str| {
+        name == workspace
+            || config
+                .workspace_path(name)
+                .and_then(|path| Ok((path, config.workspace_path(workspace)?)))
+                .is_ok_and(|(left, right)| paths_match(&left, &right))
+    };
+    if same_workspace(parent) {
+        return Err(AppError::InvalidInput(format!(
+            "workspace {workspace:?} cannot be its own parent"
+        )));
+    }
+    let states = crate::workspace::scan(config, git)?;
+    if require_active
+        && !states
+            .iter()
+            .any(|state| state.exists && state.name == parent)
+    {
+        return Err(AppError::Operational(format!(
+            "parent workspace {parent:?} does not exist"
+        )));
+    }
+    let lineage = match crate::workspace::ancestry(&states, parent) {
+        Ancestry::Linked(ancestors) => ancestors
+            .iter()
+            .map(|state| state.name.clone())
+            .collect::<Vec<_>>(),
+        // The missing parent may be the workspace being created.
+        Ancestry::MissingParent { ancestors, parent } => ancestors
+            .iter()
+            .map(|state| state.name.clone())
+            .chain([parent])
+            .collect::<Vec<_>>(),
+        Ancestry::Cycle(names) => {
+            return Err(AppError::Operational(format!(
+                "parent workspace {parent:?} has cyclic parents: {}",
+                names.join(" -> ")
+            )));
+        }
+    };
+    if lineage.iter().any(|name| same_workspace(name)) {
+        return Err(AppError::Operational(format!(
+            "workspace {workspace:?} cannot have parent {parent:?} because {parent:?} descends from it"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_arguments(config: &Config, arguments: Arguments<'_>) -> Result<Overrides> {

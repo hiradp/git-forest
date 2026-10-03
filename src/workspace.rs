@@ -13,6 +13,7 @@ pub struct WorkspaceState {
     pub name: String,
     pub path: PathBuf,
     pub exists: bool,
+    pub metadata: WorkspaceMetadata,
     pub members: Vec<MemberState>,
     pub workspace_entries: Vec<PathBuf>,
     pub inconsistencies: Vec<String>,
@@ -69,7 +70,16 @@ pub fn lock_mutations(_config: &Config) -> Result<Option<MutationLock>> {
     Ok(None)
 }
 
-const SYMBOL_FILE: &str = ".forest-symbol";
+const METADATA_FILE: &str = ".forest-workspace.toml";
+const LEGACY_SYMBOL_FILE: &str = ".forest-symbol";
+const SYMBOL_KEY: &str = "symbol";
+const PARENT_KEY: &str = "parent";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceMetadata {
+    pub symbol: Option<String>,
+    pub parent: Option<String>,
+}
 
 pub fn validate_symbol(symbol: &str) -> std::result::Result<(), &'static str> {
     if symbol.is_empty() || symbol.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -80,30 +90,157 @@ pub fn validate_symbol(symbol: &str) -> std::result::Result<(), &'static str> {
     Ok(())
 }
 
-fn symbol_file_exists(path: &Path) -> Result<bool> {
+fn metadata_file_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(true),
         Ok(_) => Err(AppError::Operational(format!(
-            "workspace symbol {} must be a regular file, not a directory or symlink",
+            "workspace metadata {} must be a regular file, not a directory or symlink",
             path.display()
         ))),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(AppError::Filesystem {
-            context: format!("could not inspect workspace symbol {}", path.display()),
+            context: format!("could not inspect workspace metadata {}", path.display()),
             source,
         }),
     }
 }
 
-pub fn prepare_symbol(workspace: &Path, symbol: &str) -> Result<()> {
-    validate_symbol(symbol).map_err(|message| AppError::InvalidInput(message.to_owned()))?;
-    symbol_file_exists(&workspace.join(SYMBOL_FILE))?;
+pub fn prepare_metadata(
+    workspace: &Path,
+    symbol: Option<&str>,
+    parent: Option<&str>,
+) -> Result<()> {
+    if let Some(symbol) = symbol {
+        validate_symbol(symbol).map_err(|message| AppError::InvalidInput(message.to_owned()))?;
+    }
+    if let Some(parent) = parent {
+        crate::config::validate_workspace_name(parent)?;
+    }
+    if symbol.is_some() || parent.is_some() {
+        // Read everything a write would read, so it cannot fail after mutation.
+        let table = read_table(workspace)?;
+        if symbol.is_none() && !table.contains_key(SYMBOL_KEY) {
+            read_legacy_symbol(workspace)?;
+        } else {
+            metadata_file_exists(&workspace.join(LEGACY_SYMBOL_FILE))?;
+        }
+    }
     Ok(())
 }
 
-pub fn read_symbol(workspace: &Path) -> Result<Option<String>> {
-    let path = workspace.join(SYMBOL_FILE);
-    if !symbol_file_exists(&path)? {
+pub fn read_metadata(workspace: &Path) -> Result<WorkspaceMetadata> {
+    let (metadata, errors) = read_metadata_fields(workspace)?;
+    match errors.into_iter().next() {
+        Some(error) => Err(error),
+        None => Ok(metadata),
+    }
+}
+
+/// The readable saved parent, ignoring errors in other fields.
+pub fn saved_parent(workspace: &Path) -> Option<String> {
+    read_metadata_fields(workspace).ok()?.0.parent
+}
+
+/// Reads each field independently so that one invalid field cannot hide the
+/// others, such as a parent link that protects a child from retirement.
+fn read_metadata_fields(workspace: &Path) -> Result<(WorkspaceMetadata, Vec<AppError>)> {
+    let table = read_table(workspace)?;
+    let path = workspace.join(METADATA_FILE);
+    let mut metadata = WorkspaceMetadata::default();
+    let mut errors = Vec::new();
+    if let Some(value) = table.get(PARENT_KEY) {
+        match value.as_str() {
+            None => errors.push(invalid_metadata(&path, "parent must be a string")),
+            Some(parent) => match crate::config::validate_workspace_name(parent) {
+                Ok(()) => metadata.parent = Some(parent.to_owned()),
+                Err(error) => {
+                    let message = error.to_string();
+                    errors.push(invalid_metadata(
+                        &path,
+                        message.strip_prefix("invalid input: ").unwrap_or(&message),
+                    ));
+                }
+            },
+        }
+    }
+    match table.get(SYMBOL_KEY) {
+        Some(value) => match value.as_str() {
+            None => errors.push(invalid_metadata(&path, "symbol must be a string")),
+            Some(symbol) => match validate_symbol(symbol) {
+                Ok(()) => metadata.symbol = Some(symbol.to_owned()),
+                Err(message) => errors.push(invalid_metadata(&path, message)),
+            },
+        },
+        None => match read_legacy_symbol(workspace) {
+            Ok(symbol) => metadata.symbol = symbol,
+            Err(error) => errors.push(error),
+        },
+    }
+    Ok((metadata, errors))
+}
+
+/// Sets the given fields, preserving every other key, and retires the legacy
+/// symbol file.
+pub fn update_metadata(workspace: &Path, symbol: Option<&str>, parent: Option<&str>) -> Result<()> {
+    use std::io::Write;
+
+    if symbol.is_none() && parent.is_none() {
+        return Ok(());
+    }
+    prepare_metadata(workspace, symbol, parent)?;
+    let mut table = read_table(workspace)?;
+    if let Some(symbol) = symbol {
+        table.insert(SYMBOL_KEY.to_owned(), symbol.into());
+    } else if !table.contains_key(SYMBOL_KEY)
+        && let Some(symbol) = read_legacy_symbol(workspace)?
+    {
+        table.insert(SYMBOL_KEY.to_owned(), symbol.into());
+    }
+    if let Some(parent) = parent {
+        table.insert(PARENT_KEY.to_owned(), parent.into());
+    }
+
+    let path = workspace.join(METADATA_FILE);
+    let contents = toml::to_string(&table)
+        .map_err(|error| invalid_metadata(&path, &format!("could not serialize: {error}")))?;
+    let write = || -> std::io::Result<()> {
+        let mut temporary = tempfile::NamedTempFile::new_in(workspace)?;
+        temporary.write_all(contents.as_bytes())?;
+        temporary.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    write().map_err(|source| AppError::Filesystem {
+        context: format!("could not write workspace metadata {}", path.display()),
+        source,
+    })?;
+
+    let legacy = workspace.join(LEGACY_SYMBOL_FILE);
+    if metadata_file_exists(&legacy)? {
+        fs::remove_file(&legacy).map_err(|source| AppError::Filesystem {
+            context: format!("could not remove legacy symbol file {}", legacy.display()),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn read_table(workspace: &Path) -> Result<toml::Table> {
+    let path = workspace.join(METADATA_FILE);
+    if !metadata_file_exists(&path)? {
+        return Ok(toml::Table::new());
+    }
+    let contents = fs::read_to_string(&path).map_err(|source| AppError::Filesystem {
+        context: format!("could not read workspace metadata {}", path.display()),
+        source,
+    })?;
+    contents
+        .parse::<toml::Table>()
+        .map_err(|error| invalid_metadata(&path, error.message()))
+}
+
+fn read_legacy_symbol(workspace: &Path) -> Result<Option<String>> {
+    let path = workspace.join(LEGACY_SYMBOL_FILE);
+    if !metadata_file_exists(&path)? {
         return Ok(None);
     }
     let contents = fs::read_to_string(&path).map_err(|source| AppError::Filesystem {
@@ -117,21 +254,11 @@ pub fn read_symbol(workspace: &Path) -> Result<Option<String>> {
     Ok(Some(symbol.to_owned()))
 }
 
-pub fn write_symbol(workspace: &Path, symbol: &str) -> Result<()> {
-    use std::io::Write;
-
-    prepare_symbol(workspace, symbol)?;
-    let path = workspace.join(SYMBOL_FILE);
-    let write = || -> std::io::Result<()> {
-        let mut temporary = tempfile::NamedTempFile::new_in(workspace)?;
-        writeln!(temporary, "{symbol}")?;
-        temporary.persist(&path).map_err(|error| error.error)?;
-        Ok(())
-    };
-    write().map_err(|source| AppError::Filesystem {
-        context: format!("could not write workspace symbol {}", path.display()),
-        source,
-    })
+fn invalid_metadata(path: &Path, message: &str) -> AppError {
+    AppError::Operational(format!(
+        "invalid workspace metadata {}: {message}",
+        path.display()
+    ))
 }
 
 struct RepositoryRegistry<'a> {
@@ -268,6 +395,20 @@ fn build_workspace(
         }
         workspace_entries.sort();
     }
+    let metadata = if exists {
+        match read_metadata_fields(&path) {
+            Ok((metadata, errors)) => {
+                inconsistencies.extend(errors.iter().map(ToString::to_string));
+                metadata
+            }
+            Err(error) => {
+                inconsistencies.push(error.to_string());
+                WorkspaceMetadata::default()
+            }
+        }
+    } else {
+        WorkspaceMetadata::default()
+    };
 
     let mut members = Vec::new();
     for registry in registries {
@@ -378,13 +519,59 @@ fn build_workspace(
         name,
         path,
         exists,
+        metadata,
         members,
         workspace_entries,
         inconsistencies,
     })
 }
 
-fn paths_match(left: &Path, right: &Path) -> bool {
+pub fn children<'a>(
+    states: &'a [WorkspaceState],
+    name: &'a str,
+) -> impl Iterator<Item = &'a WorkspaceState> {
+    states.iter().filter(move |state| {
+        state.exists && state.name != name && state.metadata.parent.as_deref() == Some(name)
+    })
+}
+
+pub enum Ancestry<'a> {
+    /// Parents from nearest to the root; every one is an active workspace.
+    Linked(Vec<&'a WorkspaceState>),
+    /// The chain names a workspace that is not active.
+    MissingParent {
+        ancestors: Vec<&'a WorkspaceState>,
+        parent: String,
+    },
+    Cycle(Vec<String>),
+}
+
+pub fn ancestry<'a>(states: &'a [WorkspaceState], name: &str) -> Ancestry<'a> {
+    let mut visited = vec![name.to_owned()];
+    let mut ancestors = Vec::new();
+    let mut current = states.iter().find(|state| state.name == name);
+    while let Some(parent) = current.and_then(|state| state.metadata.parent.as_deref()) {
+        if visited.iter().any(|seen| seen == parent) {
+            visited.push(parent.to_owned());
+            return Ancestry::Cycle(visited);
+        }
+        visited.push(parent.to_owned());
+        let Some(state) = states
+            .iter()
+            .find(|state| state.exists && state.name == parent)
+        else {
+            return Ancestry::MissingParent {
+                ancestors,
+                parent: parent.to_owned(),
+            };
+        };
+        ancestors.push(state);
+        current = Some(state);
+    }
+    Ancestry::Linked(ancestors)
+}
+
+pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }

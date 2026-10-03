@@ -113,6 +113,9 @@ esac
         command
             .current_dir(current_dir)
             .env_remove("FOREST_CONFIG")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_TAB_ID")
+            .env_remove("HERDR_PANE_ID")
             .env("PATH", command_path)
             .env("HERDR_FAKE_LOG", &self.log);
         command
@@ -1128,20 +1131,6 @@ fn manages_multiple_named_checkouts_for_one_repository() {
         .collect::<Vec<_>>();
     assert_eq!(checkouts, ["alpha", "beta", "beta@part-2"]);
 
-    let herdr = FakeHerdr::new(&fixture.root);
-    let attached = herdr
-        .command(&fixture.root)
-        .args(["attach", "stacked", "--json"])
-        .output()
-        .unwrap();
-    assert_success(&attached);
-    let report: Value = serde_json::from_slice(&attached.stdout).unwrap();
-    assert_eq!(report["tabs"][3]["label"], "4-beta@part-2");
-    assert!(herdr.calls().contains(
-        &"pane\treport-metadata\tw-new:p-beta@part-2\t--source\tgit-forest\t--token\tgit_forest_tab=repository:beta@part-2"
-            .to_owned()
-    ));
-
     let removed = forest(
         &fixture.root,
         &["remove", "stacked", "beta@part-2", "--json"],
@@ -1784,8 +1773,8 @@ fn symbol_changes_wait_for_successful_checkout_preflight() {
     assert!(!output.status.success());
     assert!(!workspace.join("alpha").exists());
     assert_eq!(
-        fs::read_to_string(workspace.join(".forest-symbol")).unwrap(),
-        "🌲\n"
+        workspace_metadata(&workspace)["symbol"].as_str(),
+        Some("🌲")
     );
 }
 
@@ -1882,7 +1871,7 @@ fn removing_checkouts_preserves_the_workspace_symbol_and_directory() {
         &["create", "topic", "alpha", "--symbol", "🌲"],
     ));
     let workspace = fixture.workspace("topic");
-    let symbol_path = workspace.join(".forest-symbol");
+    let symbol_path = workspace.join(".forest-workspace.toml");
 
     let output = forest(&fixture.root, &["remove", "topic", "--json"]);
 
@@ -1894,7 +1883,10 @@ fn removing_checkouts_preserves_the_workspace_symbol_and_directory() {
         serde_json::json!([symbol_path])
     );
     assert!(!workspace.join("alpha").exists());
-    assert_eq!(fs::read_to_string(&symbol_path).unwrap(), "🌲\n");
+    assert_eq!(
+        workspace_metadata(&workspace)["symbol"].as_str(),
+        Some("🌲")
+    );
     let listed = forest(&fixture.root, &["list", "--json"]);
     assert_success(&listed);
     let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
@@ -1971,8 +1963,8 @@ fn preserves_symbols_through_rename_archive_and_restore() {
         &["unarchive", "renamed", "--symbol", "🐛"],
     ));
     assert_eq!(
-        fs::read_to_string(fixture.workspace("renamed").join(".forest-symbol")).unwrap(),
-        "🐛\n"
+        workspace_metadata(&fixture.workspace("renamed"))["symbol"].as_str(),
+        Some("🐛")
     );
 
     let active = forest(
@@ -1983,22 +1975,18 @@ fn preserves_symbols_through_rename_archive_and_restore() {
     let report: Value = serde_json::from_slice(&active.stdout).unwrap();
     assert_eq!(report["status"], "already_active");
     assert_eq!(
-        fs::read_to_string(fixture.workspace("renamed").join(".forest-symbol")).unwrap(),
-        "🔥\n"
+        workspace_metadata(&fixture.workspace("renamed"))["symbol"].as_str(),
+        Some("🔥")
     );
 }
 
 #[test]
-fn attaches_a_workspace_with_single_pane_herdr_tabs() {
+fn attaches_a_standalone_workspace_as_a_single_main_tab() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
         &fixture.root,
         &["create", "topic", "alpha", "gamma", "--json"],
     ));
-    write_config(
-        &fixture.root.join(".forest.toml"),
-        &["gamma", "beta", "alpha"],
-    );
     let herdr = FakeHerdr::new(&fixture.root);
 
     let output = herdr
@@ -2012,33 +2000,27 @@ fn attaches_a_workspace_with_single_pane_herdr_tabs() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["workspace"], "topic");
     assert_eq!(report["path"], path(&fixture.workspace("topic")));
+    assert_eq!(report["parent"], Value::Null);
     assert_eq!(report["herdr_workspace_id"], "w-new");
     assert_eq!(report["status"], "created");
-    let tabs = report["tabs"].as_array().unwrap();
-    assert_eq!(tabs.len(), 3);
-    assert_eq!(tabs[0]["label"], "1-main");
-    assert_eq!(tabs[0]["path"], path(&fixture.workspace("topic")));
-    assert_eq!(tabs[0]["status"], "created");
-    assert_eq!(tabs[1]["label"], "2-gamma");
     assert_eq!(
-        tabs[1]["path"],
-        path(&fixture.workspace("topic").join("gamma"))
-    );
-    assert_eq!(tabs[2]["label"], "3-alpha");
-    assert_eq!(
-        tabs[2]["path"],
-        path(&fixture.workspace("topic").join("alpha"))
+        report["tabs"],
+        serde_json::json!([{
+            "label": "1-main",
+            "path": path(&fixture.workspace("topic")),
+            "herdr_tab_id": "w-new:t-main",
+            "status": "created"
+        }])
     );
 
     let calls = herdr.calls();
-    assert!(calls.contains(&"workspace\tlist".to_owned()));
     assert!(calls.contains(&format!(
         "workspace\tcreate\t--cwd\t{}\t--label\ttopic\t--no-focus",
         fixture.workspace("topic").display()
     )));
     assert!(calls.contains(&format!(
-        "workspace\treport-metadata\tw-new\t--source\tgit-forest\t--token\tgit_forest_path={}",
-        fixture.workspace("topic").display()
+        "workspace\treport-metadata\tw-new\t--source\tgit-forest\t--token\tgit_forest_id={}",
+        herdr_id(&fixture.workspace("topic"))
     )));
     assert!(
         calls.contains(
@@ -2047,63 +2029,32 @@ fn attaches_a_workspace_with_single_pane_herdr_tabs() {
         )
     );
     assert!(calls.contains(&"tab\trename\tw-new:t-main\t1-main".to_owned()));
-    assert!(calls.contains(&format!(
-        "tab\tcreate\t--workspace\tw-new\t--cwd\t{}\t--label\t2-gamma\t--no-focus",
-        fixture.workspace("topic").join("gamma").display()
-    )));
-    assert!(calls.contains(&format!(
-        "tab\tcreate\t--workspace\tw-new\t--cwd\t{}\t--label\t3-alpha\t--no-focus",
-        fixture.workspace("topic").join("alpha").display()
-    )));
-    assert!(!calls.iter().any(|call| call.contains("beta")));
+    assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
     assert_eq!(
         &calls[calls.len() - 2..],
         ["workspace\tfocus\tw-new", "tab\tfocus\tw-new:t-main"]
     );
 }
-
 #[test]
-fn reconciles_and_focuses_an_existing_herdr_workspace() {
+fn adopts_an_old_layout_workspace_without_touching_repository_tabs() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(
         &fixture.root,
         &["create", "topic", "alpha", "beta", "--json"],
     ));
     let herdr = FakeHerdr::new(&fixture.root);
-    let forest_workspace = fixture.workspace("topic");
-    let workspace_path = path(&forest_workspace);
-    let workspaces = serde_json::json!({
-        "result": {
-            "workspaces": [{
-                "workspace_id": "w-existing",
-                "tokens": {"git_forest_path": workspace_path}
-            }]
-        }
-    });
-    let tabs = serde_json::json!({
-        "result": {
-            "tabs": [
-                {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 1},
-                {"tab_id": "w-existing:t-alpha", "label": "alpha-old", "number": 2, "pane_count": 1}
-            ]
-        }
-    });
-    let panes = serde_json::json!({
-        "result": {
-            "panes": [
-                {
-                    "pane_id": "w-existing:p-main",
-                    "tab_id": "w-existing:t-main",
-                    "tokens": {"git_forest_tab": "main"}
-                },
-                {
-                    "pane_id": "w-existing:p-alpha",
-                    "tab_id": "w-existing:t-alpha",
-                    "tokens": {"git_forest_tab": "repository:alpha"}
-                }
-            ]
-        }
-    });
+    let workspaces = serde_json::json!({"result": {"workspaces": [{
+        "workspace_id": "w-existing",
+        "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
+    }]}});
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 1},
+        {"tab_id": "w-existing:t-alpha", "label": "alpha-old", "number": 2, "pane_count": 1}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-existing:p-main", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "tokens": {"git_forest_tab": "main"}},
+        {"pane_id": "w-existing:p-alpha", "workspace_id": "w-existing", "tab_id": "w-existing:t-alpha", "tokens": {"git_forest_tab": "repository:alpha"}}
+    ]}});
 
     let output = herdr
         .command(&fixture.root)
@@ -2118,17 +2069,19 @@ fn reconciles_and_focuses_an_existing_herdr_workspace() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["herdr_workspace_id"], "w-existing");
     assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["status"], "reused");
-    assert_eq!(report["tabs"][1]["status"], "reconciled");
-    assert_eq!(report["tabs"][2]["status"], "created");
-
+    assert_eq!(report["tabs"].as_array().unwrap().len(), 1);
+    assert_eq!(report["tabs"][0]["herdr_tab_id"], "w-existing:t-main");
     let calls = herdr.calls();
-    assert!(!calls.iter().any(|call| call == "workspace\tcreate"));
-    assert!(calls.contains(&"tab\trename\tw-existing:t-alpha\t2-alpha".to_owned()));
-    assert!(calls.iter().any(
-        |call| call.starts_with("tab\tcreate\t--workspace\tw-existing\t")
-            && call.contains("\t3-beta\t")
-    ));
+    assert!(calls.contains(&format!(
+        "workspace\treport-metadata\tw-existing\t--source\tgit-forest\t--token\tgit_forest_id={}",
+        herdr_id(&fixture.workspace("topic"))
+    )));
+    assert!(!calls.iter().any(|call| {
+        call.starts_with("workspace\tcreate")
+            || call.starts_with("tab\tcreate")
+            || call.starts_with("tab\trename")
+            || call.starts_with("pane\treport-metadata")
+    }));
     assert_eq!(
         &calls[calls.len() - 2..],
         [
@@ -2137,52 +2090,26 @@ fn reconciles_and_focuses_an_existing_herdr_workspace() {
         ]
     );
 }
-
 #[test]
-fn recovers_a_managed_tab_after_its_tagged_root_pane_is_closed() {
+fn recovers_the_main_tab_after_its_tagged_root_pane_is_closed() {
     let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "alpha", "--json"],
-    ));
+    assert_success(&forest(&fixture.root, &["create", "topic", "--json"]));
     let herdr = FakeHerdr::new(&fixture.root);
-    let workspaces = serde_json::json!({
-        "result": {
-            "workspaces": [{
-                "workspace_id": "w-existing",
-                "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
-            }]
-        }
-    });
-    let tabs = serde_json::json!({
-        "result": {
-            "tabs": [
-                {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 1},
-                {"tab_id": "w-existing:t-alpha", "label": "2-alpha", "number": 2, "pane_count": 2}
-            ]
-        }
-    });
-    let panes = serde_json::json!({
-        "result": {
-            "panes": [
-                {
-                    "pane_id": "w-existing:p-main",
-                    "tab_id": "w-existing:t-main",
-                    "tokens": {"git_forest_tab": "main"}
-                },
-                {
-                    "pane_id": "w-existing:p-alpha-first",
-                    "tab_id": "w-existing:t-alpha",
-                    "cwd": path(&fixture.workspace("topic").join("alpha"))
-                },
-                {
-                    "pane_id": "w-existing:p-alpha-second",
-                    "tab_id": "w-existing:t-alpha",
-                    "cwd": path(&fixture.workspace("topic").join("alpha"))
-                }
-            ]
-        }
-    });
+    let workspace = fixture.workspace("topic");
+    let workspace_path = path(&workspace);
+    let workspaces = serde_json::json!({"result": {"workspaces": [{
+        "workspace_id": "w-existing",
+        "tokens": {"git_forest_id": herdr_id(&workspace)}
+    }]}});
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 2},
+        {"tab_id": "w-existing:t-child", "label": "2-child", "number": 2, "pane_count": 1}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-existing:p-first", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "cwd": workspace_path},
+        {"pane_id": "w-existing:p-second", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "cwd": workspace_path},
+        {"pane_id": "w-existing:p-child", "workspace_id": "w-existing", "tab_id": "w-existing:t-child", "cwd": workspace_path, "tokens": {"git_forest_tab": "workspace:0123456789abcdef"}}
+    ]}});
 
     let output = herdr
         .command(&fixture.root)
@@ -2196,86 +2123,19 @@ fn recovers_a_managed_tab_after_its_tagged_root_pane_is_closed() {
     assert_success(&output);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["status"], "reused");
-    assert_eq!(report["tabs"][1]["herdr_tab_id"], "w-existing:t-alpha");
-    assert_eq!(report["tabs"][1]["status"], "reconciled");
-
+    assert_eq!(report["tabs"][0]["herdr_tab_id"], "w-existing:t-main");
     let calls = herdr.calls();
     assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
-    assert!(calls.contains(&"pane\treport-metadata\tw-existing:p-alpha-first\t--source\tgit-forest\t--token\tgit_forest_tab=repository:alpha".to_owned()));
     assert_eq!(
         calls
             .iter()
-            .filter(|call| call.contains("git_forest_tab=repository:alpha"))
-            .count(),
-        1
+            .filter(|call| call.contains("git_forest_tab=main"))
+            .collect::<Vec<_>>(),
+        [
+            "pane\treport-metadata\tw-existing:p-first\t--source\tgit-forest\t--token\tgit_forest_tab=main"
+        ]
     );
 }
-
-#[test]
-fn numbers_a_repository_inserted_in_config_order_by_its_herdr_tab_position() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "alpha", "gamma", "--json"],
-    ));
-    assert_success(&forest(&fixture.root, &["add", "topic", "beta", "--json"]));
-    let herdr = FakeHerdr::new(&fixture.root);
-    let workspaces = serde_json::json!({
-        "result": {
-            "workspaces": [{
-                "workspace_id": "w-existing",
-                "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
-            }]
-        }
-    });
-    let tabs = serde_json::json!({
-        "result": {
-            "tabs": [
-                {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 1},
-                {"tab_id": "w-existing:t-alpha", "label": "2-alpha", "number": 2, "pane_count": 1},
-                {"tab_id": "w-existing:t-gamma", "label": "3-gamma", "number": 3, "pane_count": 1}
-            ]
-        }
-    });
-    let panes = serde_json::json!({
-        "result": {
-            "panes": [
-                {"pane_id": "w-existing:p-main", "tab_id": "w-existing:t-main", "tokens": {"git_forest_tab": "main"}},
-                {"pane_id": "w-existing:p-alpha", "tab_id": "w-existing:t-alpha", "tokens": {"git_forest_tab": "repository:alpha"}},
-                {"pane_id": "w-existing:p-gamma", "tab_id": "w-existing:t-gamma", "tokens": {"git_forest_tab": "repository:gamma"}}
-            ]
-        }
-    });
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "reconciled");
-    let tabs = report["tabs"].as_array().unwrap();
-    assert_eq!(tabs[0]["label"], "1-main");
-    assert_eq!(tabs[1]["label"], "2-alpha");
-    assert_eq!(tabs[2]["label"], "4-beta");
-    assert_eq!(tabs[2]["status"], "created");
-    assert_eq!(tabs[3]["label"], "3-gamma");
-    assert_eq!(tabs[3]["status"], "reused");
-
-    let calls = herdr.calls();
-    assert!(calls.iter().any(
-        |call| call.starts_with("tab\tcreate\t--workspace\tw-existing\t")
-            && call.contains("\t4-beta\t")
-    ));
-    assert!(!calls.iter().any(|call| call.starts_with("tab\trename")));
-}
-
 #[test]
 fn recovers_an_untagged_partial_herdr_workspace() {
     for (symbol, label) in [
@@ -2334,9 +2194,8 @@ fn recovers_an_untagged_partial_herdr_workspace() {
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["herdr_workspace_id"], "w-partial");
         assert_eq!(report["status"], "reconciled");
+        assert_eq!(report["tabs"].as_array().unwrap().len(), 1);
         assert_eq!(report["tabs"][0]["status"], "reconciled");
-        assert_eq!(report["tabs"][1]["status"], "created");
-        assert_eq!(report["tabs"][2]["status"], "created");
 
         let calls = herdr.calls();
         assert!(
@@ -2345,8 +2204,8 @@ fn recovers_an_untagged_partial_herdr_workspace() {
                 .any(|call| call.starts_with("workspace\tcreate"))
         );
         assert!(calls.contains(&format!(
-        "workspace\treport-metadata\tw-partial\t--source\tgit-forest\t--token\tgit_forest_path={}",
-        fixture.workspace("topic").display()
+        "workspace\treport-metadata\tw-partial\t--source\tgit-forest\t--token\tgit_forest_id={}",
+        herdr_id(&fixture.workspace("topic"))
     )));
         assert!(calls.contains(&"pane\treport-metadata\tw-partial:p-main\t--source\tgit-forest\t--token\tgit_forest_tab=main".to_owned()));
         assert!(calls.contains(&"tab\trename\tw-partial:t-main\t1-main".to_owned()));
@@ -2407,6 +2266,8 @@ fn rejects_ambiguous_partial_herdr_workspaces_with_earlier_symbols() {
         herdr.calls(),
         [
             "workspace\tlist",
+            "pane\tlist",
+            "tab\tlist",
             "tab\tlist\t--workspace\tw-first",
             "pane\tlist\t--workspace\tw-first",
             "tab\tlist\t--workspace\tw-second",
@@ -2428,11 +2289,11 @@ fn rejects_multiple_matching_herdr_workspaces_before_mutation() {
             "workspaces": [
                 {
                     "workspace_id": "w-first",
-                    "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
+                    "tokens": {"git_forest_id": herdr_id(&fixture.workspace("topic"))}
                 },
                 {
                     "workspace_id": "w-second",
-                    "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
+                    "tokens": {"git_forest_id": herdr_id(&fixture.workspace("topic"))}
                 }
             ]
         }
@@ -2486,7 +2347,7 @@ fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
                 "workspaces": [{
                     "workspace_id": "w-existing",
                     "label": label,
-                    "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
+                    "tokens": {"git_forest_id": herdr_id(&fixture.workspace("topic"))}
                 }]
             }
         });
@@ -2555,6 +2416,623 @@ fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
             assert!(renames.is_empty());
         }
     }
+}
+
+#[test]
+fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "project"]));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--parent", "project", "--symbol", "🌲"],
+    ));
+    let topic = fixture.workspace("topic");
+    let workspaces = serde_json::json!({"result": {"workspaces": [{
+        "workspace_id": "w-project",
+        "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}
+    }]}});
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}}
+    ]}});
+
+    for (index, current) in [Some("w-project"), Some("w-other"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let herdr_root = fixture.root.join(format!("herdr-{index}"));
+        fs::create_dir(&herdr_root).unwrap();
+        let herdr = FakeHerdr::new(&herdr_root);
+        let mut command = herdr.command(&fixture.root);
+        command
+            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
+            .env("HERDR_TABS_RESPONSE", tabs.to_string())
+            .env("HERDR_PANES_RESPONSE", panes.to_string())
+            .args(["attach", "topic", "--json"]);
+        if let Some(current) = current {
+            command.env("HERDR_WORKSPACE_ID", current);
+        }
+
+        let output = command.output().unwrap();
+
+        assert_success(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["parent"], "project");
+        assert_eq!(report["status"], "created");
+        let calls = herdr.calls();
+        if current == Some("w-project") {
+            assert_eq!(report["herdr_workspace_id"], "w-project");
+            assert_eq!(report["tabs"][0]["label"], "2-🌲 topic");
+            assert!(calls.contains(&format!(
+                "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\t2-🌲 topic\t--no-focus",
+                topic.display()
+            )));
+            assert!(calls.contains(&format!(
+                "pane\treport-metadata\tw-project:p-🌲 topic\t--source\tgit-forest\t--token\tgit_forest_tab=workspace:{}",
+                herdr_id(&topic)
+            )));
+            assert!(
+                !calls
+                    .iter()
+                    .any(|call| call.starts_with("workspace\tcreate"))
+            );
+            assert_eq!(
+                &calls[calls.len() - 2..],
+                [
+                    "workspace\tfocus\tw-project",
+                    "tab\tfocus\tw-project:t-🌲 topic"
+                ]
+            );
+        } else {
+            assert_eq!(report["herdr_workspace_id"], "w-new");
+            assert_eq!(report["tabs"][0]["label"], "1-main");
+            assert!(calls.contains(&format!(
+                "workspace\tcreate\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
+                topic.display()
+            )));
+            assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
+        }
+    }
+}
+
+#[test]
+fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
+    let fixture = WorkspaceFixture::new();
+    for arguments in [
+        vec!["create", "project"],
+        vec!["create", "topic", "--parent", "project"],
+        vec!["create", "slot", "--parent", "topic"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+    let topic = fixture.workspace("topic");
+    let workspaces = serde_json::json!({"result": {"workspaces": [
+        {"workspace_id": "w-project", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}},
+        {"workspace_id": "w-elsewhere"}
+    ]}});
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1},
+        {"tab_id": "w-project:t-topic", "label": "2-old", "number": 2}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}},
+        {"pane_id": "w-project:p-topic", "workspace_id": "w-project", "tab_id": "w-project:t-topic", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&topic))}}
+    ]}});
+    let attach = |index: usize, workspace: &str, current: &str| {
+        let herdr_root = fixture.root.join(format!("herdr-{index}"));
+        fs::create_dir(&herdr_root).unwrap();
+        let herdr = FakeHerdr::new(&herdr_root);
+        let output = herdr
+            .command(&fixture.root)
+            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
+            .env("HERDR_TABS_RESPONSE", tabs.to_string())
+            .env("HERDR_PANES_RESPONSE", panes.to_string())
+            .env("HERDR_WORKSPACE_ID", current)
+            .args(["attach", workspace, "--json"])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (report, herdr.calls())
+    };
+
+    let (report, calls) = attach(0, "slot", "w-project");
+
+    assert_eq!(report["herdr_workspace_id"], "w-project");
+    assert_eq!(report["tabs"][0]["label"], "3-slot");
+    assert!(calls.contains(&format!(
+        "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\t3-slot\t--no-focus",
+        fixture.workspace("slot").display()
+    )));
+
+    let (report, calls) = attach(1, "topic", "w-elsewhere");
+
+    assert_eq!(report["herdr_workspace_id"], "w-project");
+    assert_eq!(report["status"], "reconciled");
+    assert_eq!(report["tabs"][0]["label"], "2-topic");
+    assert!(
+        !calls.iter().any(|call| {
+            call.starts_with("workspace\tcreate") || call.starts_with("tab\tcreate")
+        })
+    );
+    assert!(calls.contains(&"tab\trename\tw-project:t-topic\t2-topic".to_owned()));
+    assert_eq!(
+        &calls[calls.len() - 2..],
+        [
+            "workspace\tfocus\tw-project",
+            "tab\tfocus\tw-project:t-topic"
+        ]
+    );
+}
+
+#[test]
+fn recovers_a_child_tab_after_its_tagged_pane_is_closed() {
+    let fixture = WorkspaceFixture::new();
+    for arguments in [
+        vec!["create", "project"],
+        vec!["create", "topic", "--parent", "project"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+    let topic = fixture.workspace("topic");
+    let workspaces = serde_json::json!({"result": {"workspaces": [
+        {"workspace_id": "w-project", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}}
+    ]}});
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1},
+        {"tab_id": "w-project:t-topic", "label": "2-topic", "number": 2},
+        {"tab_id": "w-project:t-owned", "label": "3-topic", "number": 3}
+    ]}});
+    let panes = serde_json::json!({"result": {"panes": [
+        {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}},
+        {"pane_id": "w-project:p-split", "workspace_id": "w-project", "tab_id": "w-project:t-topic", "cwd": path(&topic)},
+        {"pane_id": "w-project:p-owner", "workspace_id": "w-project", "tab_id": "w-project:t-owned", "tokens": {"git_forest_tab": "workspace:0123456789abcdef"}},
+        {"pane_id": "w-project:p-visitor", "workspace_id": "w-project", "tab_id": "w-project:t-owned", "cwd": path(&topic)}
+    ]}});
+    let herdr = FakeHerdr::new(&fixture.root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
+        .env("HERDR_TABS_RESPONSE", tabs.to_string())
+        .env("HERDR_PANES_RESPONSE", panes.to_string())
+        .env("HERDR_WORKSPACE_ID", "w-elsewhere")
+        .args(["attach", "topic", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["herdr_workspace_id"], "w-project");
+    assert_eq!(report["status"], "reconciled");
+    assert_eq!(report["tabs"][0]["herdr_tab_id"], "w-project:t-topic");
+    let calls = herdr.calls();
+    assert!(calls.contains(&format!(
+        "pane\treport-metadata\tw-project:p-split\t--source\tgit-forest\t--token\tgit_forest_tab=workspace:{}",
+        herdr_id(&topic)
+    )));
+    assert!(
+        !calls.iter().any(|call| {
+            call.starts_with("workspace\tcreate") || call.starts_with("tab\tcreate")
+        })
+    );
+
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "slot", "--parent", "topic"],
+    ));
+    let herdr_root = fixture.root.join("herdr-slot");
+    fs::create_dir(&herdr_root).unwrap();
+    let herdr = FakeHerdr::new(&herdr_root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
+        .env("HERDR_TABS_RESPONSE", tabs.to_string())
+        .env("HERDR_PANES_RESPONSE", panes.to_string())
+        .env("HERDR_WORKSPACE_ID", "w-project")
+        .args(["attach", "slot", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["herdr_workspace_id"], "w-project");
+    assert!(herdr.calls().iter().any(|call| {
+        call.starts_with("tab\tcreate\t--workspace\tw-project\t") && call.contains("\t4-slot\t")
+    }));
+}
+
+#[test]
+fn warns_and_opens_standalone_when_the_saved_parent_is_missing() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "topic"]));
+    fs::write(
+        fixture.workspace("topic").join(".forest-workspace.toml"),
+        "parent = \"ghost\"\n",
+    )
+    .unwrap();
+
+    for (index, json) in [true, false].into_iter().enumerate() {
+        let herdr_root = fixture.root.join(format!("herdr-{index}"));
+        fs::create_dir(&herdr_root).unwrap();
+        let herdr = FakeHerdr::new(&herdr_root);
+        let mut arguments = vec!["attach", "topic"];
+        if json {
+            arguments.push("--json");
+        }
+
+        let output = herdr
+            .command(&fixture.root)
+            .env("HERDR_WORKSPACE_ID", "w-current")
+            .args(&arguments)
+            .output()
+            .unwrap();
+
+        assert_success(&output);
+        assert!(
+            herdr
+                .calls()
+                .iter()
+                .any(|call| call.starts_with("workspace\tcreate"))
+        );
+        if json {
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["parent"], "ghost");
+            assert!(
+                report["warnings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("parent workspace \"ghost\" of \"topic\" does not exist")
+            );
+            assert!(output.stderr.is_empty());
+        } else {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("warning: parent workspace \"ghost\" of \"topic\" does not exist")
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_cyclic_parents_before_contacting_herdr() {
+    let fixture = WorkspaceFixture::new();
+    for (workspace, parent) in [("first", "second"), ("second", "first")] {
+        assert_success(&forest(&fixture.root, &["create", workspace]));
+        fs::write(
+            fixture.workspace(workspace).join(".forest-workspace.toml"),
+            format!("parent = \"{parent}\"\n"),
+        )
+        .unwrap();
+    }
+    let herdr = FakeHerdr::new(&fixture.root);
+
+    let output = herdr
+        .command(&fixture.root)
+        .args(["attach", "first", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cyclic parents: first -> second -> first")
+    );
+    assert!(!herdr.log.exists());
+}
+
+#[test]
+fn create_validates_parents_before_writing_metadata() {
+    let fixture = WorkspaceFixture::new();
+    let missing = forest(&fixture.root, &["create", "topic", "--parent", "ghost"]);
+    assert!(!missing.status.success());
+    assert!(!fixture.workspace("topic").exists());
+
+    assert_success(&forest(&fixture.root, &["create", "project"]));
+    let own = forest(&fixture.root, &["create", "project", "--parent", "project"]);
+    assert!(!own.status.success());
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--parent", "project"],
+    ));
+
+    let cycle = forest(
+        &fixture.root,
+        &["create", "project", "--parent", "topic", "--json"],
+    );
+
+    assert!(!cycle.status.success());
+    let error: Value = serde_json::from_slice(&cycle.stderr).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("descends from it")
+    );
+    assert!(
+        !fixture
+            .workspace("project")
+            .join(".forest-workspace.toml")
+            .exists()
+    );
+
+    fs::write(
+        fixture.workspace("topic").join(".forest-workspace.toml"),
+        "parent = \"absent\"\n",
+    )
+    .unwrap();
+    let through_missing = forest(&fixture.root, &["create", "absent", "--parent", "topic"]);
+    assert!(!through_missing.status.success());
+    assert!(!fixture.workspace("absent").exists());
+
+    // Only case-insensitive filesystems map both names to one directory.
+    assert_success(&forest(&fixture.root, &["create", "Upper"]));
+    if fixture.workspace("upper").exists() {
+        let case_variant = forest(&fixture.root, &["create", "upper", "--parent", "Upper"]);
+        assert!(!case_variant.status.success());
+        assert!(
+            !fixture
+                .workspace("Upper")
+                .join(".forest-workspace.toml")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn metadata_updates_keep_other_fields_and_convert_legacy_symbols() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "project"]));
+    assert_success(&forest(&fixture.root, &["create", "legacy"]));
+    let legacy = fixture.workspace("legacy");
+    fs::write(legacy.join(".forest-symbol"), "🌲\n").unwrap();
+
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "legacy", "--parent", "project"],
+    ));
+
+    assert!(!legacy.join(".forest-symbol").exists());
+    let metadata = workspace_metadata(&legacy);
+    assert_eq!(metadata["symbol"].as_str(), Some("🌲"));
+    assert_eq!(metadata["parent"].as_str(), Some("project"));
+
+    let file = legacy.join(".forest-workspace.toml");
+    let mut contents = fs::read_to_string(&file).unwrap();
+    contents.push_str("note = \"keep\"\n");
+    fs::write(&file, contents).unwrap();
+
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "legacy", "--symbol", "🔥"],
+    ));
+
+    let metadata = workspace_metadata(&legacy);
+    assert_eq!(metadata["symbol"].as_str(), Some("🔥"));
+    assert_eq!(metadata["parent"].as_str(), Some("project"));
+    assert_eq!(metadata["note"].as_str(), Some("keep"));
+}
+
+#[test]
+fn reports_invalid_metadata_in_list_and_refuses_to_attach() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "topic"]));
+    let file = fixture.workspace("topic").join(".forest-workspace.toml");
+    fs::write(&file, "parent = 5\n").unwrap();
+
+    let listed = forest(&fixture.root, &["list", "--json"]);
+
+    assert_success(&listed);
+    let report: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let issue = report["workspaces"][0]["inconsistencies"][0]
+        .as_str()
+        .unwrap();
+    assert!(issue.contains(path(&file)), "{issue}");
+    assert!(issue.contains("parent must be a string"), "{issue}");
+
+    let herdr = FakeHerdr::new(&fixture.root);
+    let attached = herdr
+        .command(&fixture.root)
+        .args(["attach", "topic", "--json"])
+        .output()
+        .unwrap();
+    assert!(!attached.status.success());
+    assert!(!herdr.log.exists());
+}
+
+#[test]
+fn renaming_a_parent_relinks_its_children_including_on_resume() {
+    let fixture = WorkspaceFixture::new();
+    for arguments in [
+        vec!["create", "project"],
+        vec!["create", "topic", "--parent", "project"],
+        vec!["create", "other", "alpha"],
+        vec!["create", "other-child", "--parent", "other"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+
+    assert_success(&forest(&fixture.root, &["rename", "project", "program"]));
+
+    assert_eq!(
+        workspace_metadata(&fixture.workspace("topic"))["parent"].as_str(),
+        Some("program")
+    );
+
+    fs::rename(fixture.workspace("other"), fixture.workspace("renamed")).unwrap();
+
+    assert_success(&forest(&fixture.root, &["rename", "other", "renamed"]));
+
+    assert_eq!(
+        workspace_metadata(&fixture.workspace("other-child"))["parent"].as_str(),
+        Some("renamed")
+    );
+
+    for arguments in [
+        vec!["create", "c1", "--parent", "program"],
+        vec!["create", "c2", "--parent", "program"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+    fs::write(
+        fixture.workspace("c2").join(".forest-symbol"),
+        "bad symbol\n",
+    )
+    .unwrap();
+
+    let blocked = forest(&fixture.root, &["rename", "program", "portfolio"]);
+
+    assert!(!blocked.status.success());
+    assert!(fixture.workspace("program").exists());
+    assert_eq!(
+        workspace_metadata(&fixture.workspace("c1"))["parent"].as_str(),
+        Some("program")
+    );
+    fs::remove_file(fixture.workspace("c2").join(".forest-symbol")).unwrap();
+
+    fs::write(
+        fixture.workspace("topic").join(".forest-workspace.toml"),
+        "parent = \"gone\"\n",
+    )
+    .unwrap();
+
+    let unrelated = forest(&fixture.root, &["rename", "gone", "program", "--json"]);
+
+    assert!(!unrelated.status.success());
+    assert_eq!(
+        workspace_metadata(&fixture.workspace("topic"))["parent"].as_str(),
+        Some("gone")
+    );
+}
+
+#[test]
+fn refuses_to_retire_a_workspace_with_active_children() {
+    let fixture = WorkspaceFixture::new();
+    for arguments in [
+        vec!["create", "project", "alpha"],
+        vec!["create", "topic", "--parent", "project"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+    let topic_metadata = fixture.workspace("topic").join(".forest-workspace.toml");
+    fs::write(&topic_metadata, "symbol = \"\"\nparent = \"project\"\n").unwrap();
+
+    let removed = forest(&fixture.root, &["remove", "project", "--json"]);
+
+    assert_success(&removed);
+    let report: Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(report["workspace_removed"], false);
+    assert!(fixture.workspace("project").exists());
+    // Only case-insensitive filesystems resolve the variant to the parent.
+    if fixture.workspace("PROJECT").exists() {
+        assert_success(&forest(&fixture.root, &["remove", "PROJECT"]));
+        assert!(fixture.workspace("project").exists());
+    }
+
+    for command in ["archive", "delete"] {
+        let output = forest(&fixture.root, &[command, "project", "--force", "--json"]);
+
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "conflict");
+        assert!(
+            report["message"]
+                .as_str()
+                .unwrap()
+                .contains("active child workspaces: topic")
+        );
+        assert!(fixture.workspace("project").exists());
+    }
+
+    fs::write(&topic_metadata, "parent = \"project\"\n").unwrap();
+    assert_success(&forest(&fixture.root, &["archive", "topic"]));
+    assert_success(&forest(&fixture.root, &["archive", "project"]));
+}
+
+#[test]
+fn unarchive_validates_and_applies_a_parent_override() {
+    let fixture = WorkspaceFixture::new();
+    for arguments in [
+        vec!["create", "project"],
+        vec!["create", "topic", "--symbol", "🌲"],
+        vec!["archive", "topic"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+
+    let missing = forest(&fixture.root, &["unarchive", "topic", "--parent", "ghost"]);
+
+    assert!(!missing.status.success());
+    assert!(!fixture.workspace("topic").exists());
+
+    let archive_path = PathBuf::from(fixture.archives()[0]["archive_path"].as_str().unwrap());
+    let saved = archive_path.join(".forest-workspace.toml");
+    let original = fs::read_to_string(&saved).unwrap();
+    fs::write(&saved, "symbol = [\n").unwrap();
+    let malformed = forest(
+        &fixture.root,
+        &["unarchive", "topic", "--parent", "project"],
+    );
+    assert!(!malformed.status.success());
+    assert!(archive_path.exists());
+    assert!(!fixture.workspace("topic").exists());
+    fs::write(&saved, original).unwrap();
+
+    assert_success(&forest(
+        &fixture.root,
+        &["unarchive", "topic", "--parent", "project"],
+    ));
+
+    let metadata = workspace_metadata(&fixture.workspace("topic"));
+    assert_eq!(metadata["parent"].as_str(), Some("project"));
+    assert_eq!(metadata["symbol"].as_str(), Some("🌲"));
+
+    for arguments in [vec!["archive", "topic"], vec!["archive", "project"]] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+    let own_parent = forest(&fixture.root, &["unarchive", "topic", "--as", "project"]);
+    assert!(!own_parent.status.success());
+    assert!(!fixture.workspace("project").exists());
+
+    assert_success(&forest(&fixture.root, &["create", "loner"]));
+    fs::write(
+        fixture.workspace("loner").join(".forest-workspace.toml"),
+        "parent = \"loner\"\n",
+    )
+    .unwrap();
+    assert_success(&forest(&fixture.root, &["archive", "loner"]));
+}
+
+#[test]
+fn lists_children_indented_under_their_parents() {
+    let fixture = WorkspaceFixture::new();
+    for arguments in [
+        vec!["create", "zz-project"],
+        vec!["create", "aa-topic", "--parent", "zz-project"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+
+    let human = forest(&fixture.root, &["list"]);
+    let json = forest(&fixture.root, &["list", "--json"]);
+
+    assert_success(&human);
+    let human = String::from_utf8(human.stdout).unwrap();
+    let parent = human.find("Workspace  zz-project").unwrap();
+    let child = human.find("    Workspace  aa-topic").unwrap();
+    assert!(parent < child, "{human}");
+    assert!(human.contains("    Parent     zz-project"), "{human}");
+    assert_success(&json);
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(report["workspaces"][0]["name"], "aa-topic");
+    assert_eq!(report["workspaces"][0]["parent"], "zz-project");
+    assert_eq!(report["workspaces"][1]["parent"], Value::Null);
 }
 
 #[test]
@@ -4830,6 +5308,22 @@ branch = {branch:?}
         ),
     )
     .unwrap();
+}
+
+fn herdr_id(workspace: &Path) -> String {
+    let hash = path(workspace)
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{hash:016x}")
+}
+
+fn workspace_metadata(workspace: &Path) -> toml::Table {
+    fs::read_to_string(workspace.join(".forest-workspace.toml"))
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 fn forest(current_dir: &Path, arguments: &[&str]) -> Output {

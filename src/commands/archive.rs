@@ -115,6 +115,15 @@ pub(crate) fn retire_locked(
             workspace_path.display()
         )));
     }
+    let children = workspace::children(&states, &arguments.workspace)
+        .map(|child| child.name.as_str())
+        .collect::<Vec<_>>();
+    if !children.is_empty() {
+        return Ok(Retirement::conflict(format!(
+            "workspace has active child workspaces: {}; archive, delete, or relink them first",
+            children.join(", ")
+        )));
+    }
 
     let storage_root = destination
         .parent()

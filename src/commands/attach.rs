@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::cli::AttachArgs;
@@ -8,36 +7,19 @@ use crate::domain::{
 };
 use crate::error::{AppError, Result};
 use crate::git::Git;
-use crate::herdr::{Herdr, HerdrPane, HerdrTab, HerdrWorkspace, TAB_TOKEN, WORKSPACE_PATH_TOKEN};
-use crate::workspace;
+use crate::herdr::{
+    self, Herdr, HerdrPane, HerdrTab, HerdrWorkspace, TAB_TOKEN, WORKSPACE_ID_TOKEN,
+    WORKSPACE_PATH_TOKEN,
+};
+use crate::workspace::{self, Ancestry};
 
 const MAIN_ROLE: &str = "main";
+const WORKSPACE_ROLE_PREFIX: &str = "workspace:";
 
-#[derive(Debug)]
-struct DesiredTab {
-    role: String,
-    name: String,
-    path: PathBuf,
-}
-
-impl DesiredTab {
-    fn label(&self, number: usize) -> String {
-        format!("{number}-{}", self.name)
-    }
-}
-
-#[derive(Debug)]
-enum ExistingTabPlan {
-    Reuse {
-        tab: HerdrTab,
-        rename: bool,
-    },
-    Recover {
-        tab: HerdrTab,
-        pane: HerdrPane,
-        rename: bool,
-    },
-    Create,
+struct Attachment {
+    herdr_workspace_id: String,
+    status: AttachStatus,
+    tab: AttachedTabReport,
 }
 
 pub fn run(
@@ -47,22 +29,16 @@ pub fn run(
     arguments: &AttachArgs,
 ) -> Result<CommandOutcome> {
     let configured_path = config.workspace_path(&arguments.workspace)?;
-    let mut states = workspace::scan(config, git)?;
-    let state = states
-        .drain(..)
-        .find(|state| state.name == arguments.workspace)
-        .ok_or_else(|| {
-            AppError::Operational(format!(
-                "workspace {:?} does not exist",
-                arguments.workspace
-            ))
-        })?;
-    if !state.exists {
+    let states = workspace::scan(config, git)?;
+    let Some(state) = states
+        .iter()
+        .find(|state| state.name == arguments.workspace && state.exists)
+    else {
         return Err(AppError::Operational(format!(
             "workspace {:?} does not exist",
             arguments.workspace
         )));
-    }
+    };
 
     for member in &state.members {
         if !member.inconsistencies.is_empty() {
@@ -75,143 +51,348 @@ pub fn run(
         }
     }
 
-    let identity_path = canonicalize(&state.path, "Forest workspace")?;
-    let identity = identity_path.to_str().ok_or_else(|| {
-        AppError::Operational(format!(
-            "Herdr cannot identify non-UTF-8 workspace path {}",
-            identity_path.display()
-        ))
-    })?;
-    let mut desired_tabs = vec![DesiredTab {
-        role: MAIN_ROLE.to_owned(),
-        name: MAIN_ROLE.to_owned(),
-        path: identity_path.clone(),
-    }];
-    for member in &state.members {
-        if !member.exists || !member.registered {
-            continue;
+    let metadata = workspace::read_metadata(&state.path)?;
+    let mut warnings = Vec::new();
+    let parent = match workspace::ancestry(&states, &arguments.workspace) {
+        Ancestry::Cycle(names) => {
+            return Err(AppError::Operational(format!(
+                "workspace {:?} has cyclic parents: {}",
+                arguments.workspace,
+                names.join(" -> ")
+            )));
         }
-        let checkout = member.id.to_string();
-        desired_tabs.push(DesiredTab {
-            role: format!("repository:{checkout}"),
-            name: checkout,
-            path: canonicalize(&member.path, "repository worktree")?,
-        });
-    }
+        Ancestry::Linked(ancestors) => ancestors.first().copied(),
+        Ancestry::MissingParent { ancestors, parent } => {
+            if ancestors.is_empty() {
+                warnings.push(format!(
+                    "parent workspace {parent:?} of {:?} does not exist; ignoring it",
+                    arguments.workspace
+                ));
+            }
+            ancestors.first().copied()
+        }
+    };
 
-    let symbol = workspace::read_symbol(&identity_path)?;
-    let workspace_label = match &symbol {
+    let path = canonicalize(&state.path, "Forest workspace")?;
+    let identity = Identity::new(&path)?;
+    let display_name = match &metadata.symbol {
         Some(symbol) => format!("{symbol} {}", arguments.workspace),
         None => arguments.workspace.clone(),
     };
+
     let workspaces = herdr.workspaces()?;
-    let matching_workspaces = workspaces
+    let tagged_workspaces = workspaces
         .iter()
-        .filter(|workspace| {
-            workspace
-                .tokens
-                .get(WORKSPACE_PATH_TOKEN)
-                .is_some_and(|path| path == identity)
-        })
+        .filter(|workspace| hosts_standalone(workspace, &identity))
         .collect::<Vec<_>>();
-    if matching_workspaces.len() > 1 {
-        let ids = matching_workspaces
-            .iter()
-            .map(|workspace| workspace.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
+    if tagged_workspaces.len() > 1 {
         return Err(AppError::Operational(format!(
-            "multiple Herdr workspaces match {}: {ids}",
-            identity_path.display()
+            "multiple Herdr workspaces match {}: {}",
+            path.display(),
+            join_ids(tagged_workspaces.iter().map(|workspace| &workspace.id))
+        )));
+    }
+    let panes = herdr.all_panes()?;
+    let role = workspace_role(&identity);
+    let tagged_panes = panes
+        .iter()
+        .filter(|pane| has_role(pane, &role))
+        .collect::<Vec<_>>();
+    if tagged_panes.len() > 1 {
+        return Err(AppError::Operational(format!(
+            "multiple Herdr panes identify workspace {:?}: {}",
+            arguments.workspace,
+            join_ids(tagged_panes.iter().map(|pane| &pane.id))
         )));
     }
 
-    let existing = if let Some(existing) = matching_workspaces.first() {
-        Some(((*existing).clone(), false))
-    } else {
-        let recoverable =
-            recoverable_workspace(herdr, &workspaces, &arguments.workspace, &identity_path)?;
-        if let Some(existing) = &recoverable {
-            herdr.report_workspace_path(&existing.id, identity)?;
+    let attachment = match (tagged_workspaces.first(), tagged_panes.first()) {
+        (Some(existing), Some(pane)) => {
+            return Err(AppError::Operational(format!(
+                "workspace {:?} is open both as Herdr workspace {} and as tab {}",
+                arguments.workspace, existing.id, pane.tab_id
+            )));
         }
-        recoverable.map(|workspace| (workspace, true))
+        (Some(existing), None) => {
+            let untagged = existing.tokens.get(WORKSPACE_ID_TOKEN) != Some(&identity.id);
+            if untagged {
+                herdr.report_workspace_id(&existing.id, &identity.id)?;
+            }
+            reattach_standalone(herdr, existing, &metadata, &display_name, &path, untagged)?
+        }
+        (None, Some(pane)) => reattach_tab(herdr, pane, &display_name, &path)?,
+        (None, None) => {
+            let untagged_tab = recoverable_tab(herdr, &panes, &display_name, &path)?;
+            let recoverable = match untagged_tab {
+                Some(_) => None,
+                None => recoverable_workspace(herdr, &workspaces, &arguments.workspace, &path)?,
+            };
+            let current = herdr.current_workspace_id();
+            let host = match (parent, current) {
+                (Some(parent), Some(current)) => {
+                    let parent_path = canonicalize(&parent.path, "parent workspace")?;
+                    let parent_identity = Identity::new(&parent_path)?;
+                    let parent_display_name = match &parent.metadata.symbol {
+                        Some(symbol) => format!("{symbol} {}", parent.name),
+                        None => parent.name.clone(),
+                    };
+                    let parent_untagged_here =
+                        recoverable_tab(herdr, &panes, &parent_display_name, &parent_path)?
+                            .is_some_and(|pane| pane.workspace_id == current);
+                    workspaces
+                        .iter()
+                        .find(|workspace| workspace.id == current)
+                        .filter(|workspace| {
+                            parent_untagged_here
+                                || hosts_standalone(workspace, &parent_identity)
+                                || panes.iter().any(|pane| {
+                                    pane.workspace_id == workspace.id
+                                        && has_role(pane, &workspace_role(&parent_identity))
+                                })
+                        })
+                }
+                _ => None,
+            };
+            if let Some(pane) = untagged_tab {
+                herdr.report_tab_role(&pane.id, &role)?;
+                let mut attachment = reattach_tab(herdr, &pane, &display_name, &path)?;
+                attachment.status = AttachStatus::Reconciled;
+                attachment
+            } else if let Some(existing) = recoverable {
+                herdr.report_workspace_id(&existing.id, &identity.id)?;
+                reattach_standalone(herdr, &existing, &metadata, &display_name, &path, true)?
+            } else if let Some(host) = host {
+                create_tab(herdr, &host.id, &role, &display_name, &path)?
+            } else {
+                create_standalone(herdr, &display_name, &identity, &path)?
+            }
+        }
     };
 
-    let (herdr_workspace_id, status, tabs, main_tab_id) =
-        if let Some((existing, recovered)) = existing {
-            let (mut status, tabs, main_tab_id) =
-                reconcile_existing(herdr, &existing.id, &desired_tabs)?;
-            if symbol.is_some() && existing.label.as_deref() != Some(&workspace_label) {
-                herdr.rename_workspace(&existing.id, &workspace_label)?;
-                status = AttachStatus::Reconciled;
-            }
-            if recovered {
-                status = AttachStatus::Reconciled;
-            }
-            (existing.id, status, tabs, main_tab_id)
-        } else {
-            create_workspace(herdr, &workspace_label, identity, &desired_tabs)?
-        };
-
-    herdr.focus_workspace(&herdr_workspace_id)?;
-    herdr.focus_tab(&main_tab_id)?;
+    herdr.focus_workspace(&attachment.herdr_workspace_id)?;
+    herdr.focus_tab(&attachment.tab.herdr_tab_id)?;
 
     Ok(CommandOutcome::success(CommandReport::WorkspaceAttach(
         WorkspaceAttachReport {
             workspace: arguments.workspace.clone(),
             path: configured_path,
-            herdr_workspace_id,
-            status,
-            tabs,
+            parent: metadata.parent,
+            herdr_workspace_id: attachment.herdr_workspace_id,
+            status: attachment.status,
+            tabs: vec![attachment.tab],
+            warnings,
         },
     )))
 }
 
-fn create_workspace(
+fn create_standalone(
     herdr: &Herdr,
-    workspace_name: &str,
-    identity: &str,
-    desired_tabs: &[DesiredTab],
-) -> Result<(String, AttachStatus, Vec<AttachedTabReport>, String)> {
-    let main = desired_tabs
-        .first()
-        .expect("every Herdr attachment has a main tab");
-    let created = herdr.create_workspace(&main.path, workspace_name)?;
+    display_name: &str,
+    identity: &Identity<'_>,
+    path: &Path,
+) -> Result<Attachment> {
+    let created = herdr.create_workspace(path, display_name)?;
     let workspace_id = created.workspace.id;
-    herdr.report_workspace_path(&workspace_id, identity)?;
-    herdr.report_tab_role(&created.root_pane.id, &main.role)?;
-    let main_label = main.label(created.tab.number);
-    if created.tab.label != main_label {
-        herdr.rename_tab(&created.tab.id, &main_label)?;
+    herdr.report_workspace_id(&workspace_id, &identity.id)?;
+    herdr.report_tab_role(&created.root_pane.id, MAIN_ROLE)?;
+    let label = tab_label(created.tab.number, MAIN_ROLE);
+    if created.tab.label != label {
+        herdr.rename_tab(&created.tab.id, &label)?;
+    }
+    Ok(Attachment {
+        herdr_workspace_id: workspace_id,
+        status: AttachStatus::Created,
+        tab: tab_report(label, path, created.tab.id, AttachStatus::Created),
+    })
+}
+
+fn create_tab(
+    herdr: &Herdr,
+    workspace_id: &str,
+    role: &str,
+    display_name: &str,
+    path: &Path,
+) -> Result<Attachment> {
+    let next_number = herdr
+        .tabs(workspace_id)?
+        .iter()
+        .map(|tab| tab.number)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let created = herdr.create_tab(workspace_id, path, &tab_label(next_number, display_name))?;
+    herdr.report_tab_role(&created.root_pane.id, role)?;
+    let label = tab_label(created.tab.number, display_name);
+    if created.tab.label != label {
+        herdr.rename_tab(&created.tab.id, &label)?;
+    }
+    Ok(Attachment {
+        herdr_workspace_id: workspace_id.to_owned(),
+        status: AttachStatus::Created,
+        tab: tab_report(label, path, created.tab.id, AttachStatus::Created),
+    })
+}
+
+fn reattach_tab(
+    herdr: &Herdr,
+    pane: &HerdrPane,
+    display_name: &str,
+    path: &Path,
+) -> Result<Attachment> {
+    let tab = find_tab(herdr, pane)?;
+    let label = tab_label(tab.number, display_name);
+    let status = if tab.label == label {
+        AttachStatus::Reused
+    } else {
+        herdr.rename_tab(&tab.id, &label)?;
+        AttachStatus::Reconciled
+    };
+    Ok(Attachment {
+        herdr_workspace_id: pane.workspace_id.clone(),
+        status,
+        tab: tab_report(label, path, tab.id, status),
+    })
+}
+
+fn reattach_standalone(
+    herdr: &Herdr,
+    existing: &HerdrWorkspace,
+    metadata: &workspace::WorkspaceMetadata,
+    display_name: &str,
+    path: &Path,
+    recovered: bool,
+) -> Result<Attachment> {
+    let tabs = herdr.tabs(&existing.id)?;
+    let panes = herdr.panes(&existing.id)?;
+    let tagged = panes
+        .iter()
+        .filter(|pane| has_role(pane, MAIN_ROLE))
+        .collect::<Vec<_>>();
+    if tagged.len() > 1 {
+        return Err(AppError::Operational(format!(
+            "multiple Herdr panes identify tab {MAIN_ROLE:?}: {}",
+            join_ids(tagged.iter().map(|pane| &pane.id))
+        )));
     }
 
-    let main_tab_id = created.tab.id.clone();
-    let mut next_tab_number = created.tab.number.saturating_add(1);
-    let mut tabs = Vec::with_capacity(desired_tabs.len());
-    tabs.push(tab_report(
-        main,
-        main_label,
-        created.tab.id,
-        AttachStatus::Created,
-    ));
-    for desired in &desired_tabs[1..] {
-        let requested_label = desired.label(next_tab_number);
-        let created = herdr.create_tab(&workspace_id, &desired.path, &requested_label)?;
-        herdr.report_tab_role(&created.root_pane.id, &desired.role)?;
-        let label = desired.label(created.tab.number);
-        if created.tab.label != label {
-            herdr.rename_tab(&created.tab.id, &label)?;
+    let mut changed = recovered;
+    let main = if let Some(pane) = tagged.first() {
+        Some(
+            tabs.iter()
+                .find(|tab| tab.id == pane.tab_id)
+                .cloned()
+                .ok_or_else(|| unknown_tab(pane))?,
+        )
+    } else {
+        // Tabs holding any tagged pane belong to another managed role.
+        let recoverable = tabs
+            .iter()
+            .filter(|tab| {
+                !panes
+                    .iter()
+                    .any(|pane| pane.tab_id == tab.id && pane.tokens.contains_key(TAB_TOKEN))
+            })
+            .filter_map(|tab| {
+                let pane = panes.iter().find(|pane| {
+                    pane.tab_id == tab.id
+                        && pane
+                            .cwd
+                            .as_deref()
+                            .is_some_and(|cwd| paths_match(cwd, path))
+                })?;
+                Some((tab, pane))
+            })
+            .collect::<Vec<_>>();
+        if recoverable.len() > 1 {
+            return Err(AppError::Operational(format!(
+                "multiple untagged Herdr tabs match {MAIN_ROLE:?}: {}",
+                join_ids(recoverable.iter().map(|(tab, _)| &tab.id))
+            )));
         }
-        next_tab_number = created.tab.number.saturating_add(1);
-        tabs.push(tab_report(
-            desired,
-            label,
-            created.tab.id,
-            AttachStatus::Created,
-        ));
+        if let Some((tab, pane)) = recoverable.first() {
+            herdr.report_tab_role(&pane.id, MAIN_ROLE)?;
+            changed = true;
+            Some((*tab).clone())
+        } else {
+            None
+        }
+    };
+
+    let (tab_id, label, tab_status) = match main {
+        Some(tab) => {
+            let label = tab_label(tab.number, MAIN_ROLE);
+            if tab.label == label {
+                (tab.id, label, AttachStatus::Reused)
+            } else {
+                herdr.rename_tab(&tab.id, &label)?;
+                changed = true;
+                (tab.id, label, AttachStatus::Reconciled)
+            }
+        }
+        None => {
+            let created = create_tab(herdr, &existing.id, MAIN_ROLE, MAIN_ROLE, path)?;
+            changed = true;
+            (
+                created.tab.herdr_tab_id,
+                created.tab.label,
+                AttachStatus::Created,
+            )
+        }
+    };
+
+    if metadata.symbol.is_some() && existing.label.as_deref() != Some(display_name) {
+        herdr.rename_workspace(&existing.id, display_name)?;
+        changed = true;
     }
 
-    Ok((workspace_id, AttachStatus::Created, tabs, main_tab_id))
+    Ok(Attachment {
+        herdr_workspace_id: existing.id.clone(),
+        status: if changed {
+            AttachStatus::Reconciled
+        } else {
+            AttachStatus::Reused
+        },
+        tab: tab_report(label, path, tab_id, tab_status),
+    })
+}
+
+/// A pane in a tab whose tagged pane was closed, identified by the tab's
+/// managed label and an untagged pane rooted in the workspace.
+fn recoverable_tab(
+    herdr: &Herdr,
+    panes: &[HerdrPane],
+    display_name: &str,
+    path: &Path,
+) -> Result<Option<HerdrPane>> {
+    let mut recoverable = herdr
+        .all_tabs()?
+        .into_iter()
+        .filter(|tab| tab.label == tab_label(tab.number, display_name))
+        .filter(|tab| {
+            !panes
+                .iter()
+                .any(|pane| pane.tab_id == tab.id && pane.tokens.contains_key(TAB_TOKEN))
+        })
+        .filter_map(|tab| {
+            panes
+                .iter()
+                .find(|pane| {
+                    pane.tab_id == tab.id
+                        && pane
+                            .cwd
+                            .as_deref()
+                            .is_some_and(|cwd| paths_match(cwd, path))
+                })
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    if recoverable.len() > 1 {
+        return Err(AppError::Operational(format!(
+            "multiple untagged Herdr tabs match {display_name:?}: {}",
+            join_ids(recoverable.iter().map(|pane| &pane.tab_id))
+        )));
+    }
+    Ok(recoverable.pop())
 }
 
 fn recoverable_workspace(
@@ -222,7 +403,8 @@ fn recoverable_workspace(
 ) -> Result<Option<HerdrWorkspace>> {
     let mut recoverable = Vec::new();
     for workspace in workspaces.iter().filter(|workspace| {
-        !workspace.tokens.contains_key(WORKSPACE_PATH_TOKEN)
+        !workspace.tokens.contains_key(WORKSPACE_ID_TOKEN)
+            && !workspace.tokens.contains_key(WORKSPACE_PATH_TOKEN)
             && workspace.label.as_deref().is_some_and(|label| {
                 label == workspace_name
                     || label.split_once(' ').is_some_and(|(symbol, name)| {
@@ -243,178 +425,88 @@ fn recoverable_workspace(
         }
     }
     if recoverable.len() > 1 {
-        let ids = recoverable
-            .iter()
-            .map(|workspace| workspace.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
         return Err(AppError::Operational(format!(
-            "multiple untagged Herdr workspaces match {}: {ids}",
-            workspace_path.display()
+            "multiple untagged Herdr workspaces match {}: {}",
+            workspace_path.display(),
+            join_ids(recoverable.iter().map(|workspace| &workspace.id))
         )));
     }
     Ok(recoverable.into_iter().next())
 }
 
-fn reconcile_existing(
-    herdr: &Herdr,
-    workspace_id: &str,
-    desired_tabs: &[DesiredTab],
-) -> Result<(AttachStatus, Vec<AttachedTabReport>, String)> {
-    let tabs = herdr.tabs(workspace_id)?;
-    let panes = herdr.panes(workspace_id)?;
-    let tabs_by_id = tabs
-        .iter()
-        .map(|tab| (tab.id.as_str(), tab))
-        .collect::<HashMap<_, _>>();
+fn find_tab(herdr: &Herdr, pane: &HerdrPane) -> Result<HerdrTab> {
+    herdr
+        .tabs(&pane.workspace_id)?
+        .into_iter()
+        .find(|tab| tab.id == pane.tab_id)
+        .ok_or_else(|| unknown_tab(pane))
+}
 
-    let mut plans = Vec::with_capacity(desired_tabs.len());
-    for desired in desired_tabs {
-        let tagged = panes
-            .iter()
-            .filter(|pane| {
-                pane.tokens
-                    .get(TAB_TOKEN)
-                    .is_some_and(|role| role == &desired.role)
-            })
-            .collect::<Vec<_>>();
-        if tagged.len() > 1 {
-            let ids = tagged
-                .iter()
-                .map(|pane| pane.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(AppError::Operational(format!(
-                "multiple Herdr panes identify tab {:?}: {ids}",
-                desired.name
-            )));
-        }
-        if let Some(pane) = tagged.first() {
-            let tab = tabs_by_id.get(pane.tab_id.as_str()).ok_or_else(|| {
-                AppError::Operational(format!(
-                    "Herdr pane {} references unknown tab {}",
-                    pane.id, pane.tab_id
-                ))
-            })?;
-            plans.push(ExistingTabPlan::Reuse {
-                tab: (*tab).clone(),
-                rename: tab.label != desired.label(tab.number),
-            });
-            continue;
-        }
-
-        let recoverable = tabs
-            .iter()
-            .filter_map(|tab| {
-                if desired.role != MAIN_ROLE && tab.label != desired.label(tab.number) {
-                    return None;
-                }
-                let pane = panes.iter().find(|pane| {
-                    pane.tab_id == tab.id
-                        && pane
-                            .cwd
-                            .as_deref()
-                            .is_some_and(|cwd| paths_match(cwd, &desired.path))
-                })?;
-                Some((tab.clone(), pane.clone()))
-            })
-            .collect::<Vec<_>>();
-        if recoverable.len() > 1 {
-            let ids = recoverable
-                .iter()
-                .map(|(tab, _)| tab.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(AppError::Operational(format!(
-                "multiple untagged Herdr tabs match {:?}: {ids}",
-                desired.name
-            )));
-        }
-        if let Some((tab, pane)) = recoverable.into_iter().next() {
-            let rename = tab.label != desired.label(tab.number);
-            plans.push(ExistingTabPlan::Recover { tab, pane, rename });
-        } else {
-            plans.push(ExistingTabPlan::Create);
-        }
-    }
-
-    let mut changed = false;
-    let mut next_tab_number = tabs
-        .iter()
-        .map(|tab| tab.number)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let mut reports = Vec::with_capacity(desired_tabs.len());
-    for (desired, plan) in desired_tabs.iter().zip(plans) {
-        match plan {
-            ExistingTabPlan::Reuse { tab, rename } => {
-                let label = desired.label(tab.number);
-                let status = if rename {
-                    herdr.rename_tab(&tab.id, &label)?;
-                    changed = true;
-                    AttachStatus::Reconciled
-                } else {
-                    AttachStatus::Reused
-                };
-                reports.push(tab_report(desired, label, tab.id, status));
-            }
-            ExistingTabPlan::Recover { tab, pane, rename } => {
-                let label = desired.label(tab.number);
-                herdr.report_tab_role(&pane.id, &desired.role)?;
-                if rename {
-                    herdr.rename_tab(&tab.id, &label)?;
-                }
-                changed = true;
-                reports.push(tab_report(desired, label, tab.id, AttachStatus::Reconciled));
-            }
-            ExistingTabPlan::Create => {
-                let requested_label = desired.label(next_tab_number);
-                let created = herdr.create_tab(workspace_id, &desired.path, &requested_label)?;
-                herdr.report_tab_role(&created.root_pane.id, &desired.role)?;
-                let label = desired.label(created.tab.number);
-                if created.tab.label != label {
-                    herdr.rename_tab(&created.tab.id, &label)?;
-                }
-                next_tab_number = created.tab.number.saturating_add(1);
-                changed = true;
-                reports.push(tab_report(
-                    desired,
-                    label,
-                    created.tab.id,
-                    AttachStatus::Created,
-                ));
-            }
-        }
-    }
-
-    let main_tab_id = reports
-        .first()
-        .expect("every Herdr attachment has a main tab")
-        .herdr_tab_id
-        .clone();
-    Ok((
-        if changed {
-            AttachStatus::Reconciled
-        } else {
-            AttachStatus::Reused
-        },
-        reports,
-        main_tab_id,
+fn unknown_tab(pane: &HerdrPane) -> AppError {
+    AppError::Operational(format!(
+        "Herdr pane {} references unknown tab {}",
+        pane.id, pane.tab_id
     ))
 }
 
+fn hosts_standalone(workspace: &HerdrWorkspace, identity: &Identity<'_>) -> bool {
+    workspace.tokens.get(WORKSPACE_ID_TOKEN) == Some(&identity.id)
+        || workspace
+            .tokens
+            .get(WORKSPACE_PATH_TOKEN)
+            .map(String::as_str)
+            == Some(identity.path)
+}
+
+fn has_role(pane: &HerdrPane, role: &str) -> bool {
+    pane.tokens
+        .get(TAB_TOKEN)
+        .is_some_and(|value| value == role)
+}
+
+fn workspace_role(identity: &Identity<'_>) -> String {
+    format!("{WORKSPACE_ROLE_PREFIX}{}", identity.id)
+}
+
+fn tab_label(number: usize, name: &str) -> String {
+    format!("{number}-{name}")
+}
+
 fn tab_report(
-    desired: &DesiredTab,
     label: String,
+    path: &Path,
     tab_id: String,
     status: AttachStatus,
 ) -> AttachedTabReport {
     AttachedTabReport {
         label,
-        path: desired.path.clone(),
+        path: path.to_path_buf(),
         herdr_tab_id: tab_id,
         status,
+    }
+}
+
+fn join_ids<'a>(ids: impl Iterator<Item = &'a String>) -> String {
+    ids.map(String::as_str).collect::<Vec<_>>().join(", ")
+}
+
+struct Identity<'a> {
+    path: &'a str,
+    id: String,
+}
+
+impl<'a> Identity<'a> {
+    fn new(path: &'a Path) -> Result<Self> {
+        let path = path.to_str().ok_or_else(|| {
+            AppError::Operational(format!(
+                "Herdr cannot identify non-UTF-8 workspace path {}",
+                path.display()
+            ))
+        })?;
+        Ok(Self {
+            path,
+            id: herdr::workspace_id(path),
+        })
     }
 }
 

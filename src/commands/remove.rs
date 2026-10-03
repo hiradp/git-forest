@@ -62,6 +62,13 @@ fn run_inner(
     let workspace_path = config.workspace_path(workspace)?;
     let requested = validate_requested(config, checkouts)?;
     let mut states = workspace::scan(config, git)?;
+    // Match by directory too: case-insensitive filesystems resolve name variants.
+    let has_children = states
+        .iter()
+        .filter(|state| {
+            state.name == workspace || workspace::paths_match(&state.path, &workspace_path)
+        })
+        .any(|state| workspace::children(&states, &state.name).next().is_some());
     let state = states.drain(..).find(|state| state.name == workspace);
 
     let selected = if requested.is_empty() {
@@ -168,19 +175,22 @@ fn run_inner(
     }
 
     let mut remaining_entries = remaining_entries(&workspace_path)?;
-    let workspace_removed =
-        if remove_empty_workspace && workspace_path.is_dir() && remaining_entries.is_empty() {
-            fs::remove_dir(&workspace_path).map_err(|source| AppError::Filesystem {
-                context: format!(
-                    "could not remove empty workspace directory {}",
-                    workspace_path.display()
-                ),
-                source,
-            })?;
-            true
-        } else {
-            false
-        };
+    let workspace_removed = if remove_empty_workspace
+        && !has_children
+        && workspace_path.is_dir()
+        && remaining_entries.is_empty()
+    {
+        fs::remove_dir(&workspace_path).map_err(|source| AppError::Filesystem {
+            context: format!(
+                "could not remove empty workspace directory {}",
+                workspace_path.display()
+            ),
+            source,
+        })?;
+        true
+    } else {
+        false
+    };
     if workspace_removed {
         remaining_entries.clear();
     }

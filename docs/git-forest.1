@@ -110,14 +110,25 @@ to override a creation base and
 to select an existing local branch or create one from its remote-tracking ref.
 Use
 .BI \-\-symbol " symbol"
-to prefix the Herdr workspace name with an emoji or symbol and a space.
-The optional workspace-local
-.B .forest-symbol
-file preserves it across rename, archive, and unarchive.
+to prefix the Herdr workspace name with an emoji or symbol and a space, and
+.BI \-\-parent " workspace"
+to record an active workspace as this workspace's parent.
+Parents may nest to any depth; a parent that would form a cycle is rejected.
+Both values are stored in the optional workspace-local
+.B .forest-workspace.toml
+file as
+.B symbol
+and
+.BR parent ,
+which may be edited by hand and is preserved across rename, archive, and
+unarchive.
 Symbols must be nonempty and contain no whitespace or control characters;
-composed emoji are supported. Trailing whitespace in the saved file is ignored.
-Repeating creation with this option updates the symbol; omitting it preserves
-any saved symbol. Directory and branch names are unaffected.
+composed emoji are supported.
+Repeating creation with either option updates that value; omitting it preserves
+the saved value. Directory and branch names are unaffected.
+A legacy
+.B .forest-symbol
+file is still read and is replaced the next time Forest writes metadata.
 Creation preflights every requested checkout before mutation and is safe to
 repeat after partial execution.
 Archived names remain available: creation starts a fresh active workspace and
@@ -138,6 +149,8 @@ options as
 .B list [\-\-archived]
 List active workspaces by reconciling workspace directories with Git worktree
 metadata.
+Human output nests workspaces under their parents; JSON reports each
+.BR parent .
 With
 .BR \-\-archived ,
 list archives instead, with workspace name, human-readable date, archive ID,
@@ -164,9 +177,18 @@ ahead/behind counts.
 Print the absolute path of an existing workspace.
 .TP
 .BI attach " workspace"
-Open an existing workspace in a running Herdr session.
+Open an existing workspace in a running Herdr session as a single tab rooted in
+the workspace directory.
+If the workspace is already open, Forest focuses it.
+Otherwise, if the Herdr workspace named by
+.B HERDR_WORKSPACE_ID
+has the workspace's parent open, Forest adds a tab there labeled with its
+position, the workspace's symbol if any, and its name.
+Otherwise, Forest creates a Herdr workspace whose only tab is
+.BR 1-main .
 A saved symbol prefixes the Herdr workspace name and is reconciled on each
 attachment. Without a symbol, existing Herdr workspace names are left alone.
+A missing parent produces a warning; cyclic parents are rejected.
 .TP
 .BI rename " workspace new-workspace"
 Rename an active workspace without changing its branches or working tree
@@ -180,6 +202,9 @@ An inconsistent source or active destination prevents the rename.
 Archives do not reserve names and remain untouched.
 If Git repair fails after the directory moves, repeating the same command
 resumes the incomplete repair.
+Before moving anything, rename updates
+.B parent
+in each active child, restoring it if the directory move fails.
 Forest does not update Herdr runtime metadata.
 .TP
 .BI archive " workspace [\-\-force]"
@@ -201,8 +226,8 @@ directory disambiguates timestamp-looking legacy workspace names.
 There is no manifest or database.
 Within a workspace, archives are ordered by their actual instant and numeric
 collision suffix, with legacy archives first.
-Archival rejects dirty or unregistered worktrees, never overwrites files, and is
-safe to repeat after partial execution.
+Archival rejects dirty or unregistered worktrees and workspaces with active
+children, never overwrites files, and is safe to repeat after partial execution.
 Use
 .B \-\-force
 only to explicitly discard modified, untracked, or ignored worktree files.
@@ -227,7 +252,10 @@ options as
 .BR create .
 Use
 .BI \-\-symbol " symbol"
-to override the saved symbol when restoring; otherwise it is preserved.
+and
+.BI \-\-parent " workspace"
+to override the saved symbol or parent when restoring; otherwise they are
+preserved.
 A single archive is selected automatically; multiple archives require
 .BR "\-\-archive ID" .
 Use ID
@@ -281,7 +309,7 @@ and permanently removes them.
 Pending deletions are excluded from archive discovery and cannot be restored
 with
 .BR unarchive .
-Dirty or unregistered worktrees prevent deletion.
+Dirty or unregistered worktrees and active child workspaces prevent deletion.
 Use
 .B \-\-force
 only to explicitly discard modified, untracked, or ignored files in registered
@@ -323,8 +351,9 @@ preserves branches, and requires
 .B \-\-force
 before discarding modified, untracked, or ignored files.
 Workspace-local files, including
-.BR .forest-symbol ,
-are reported and preserved; only an empty workspace directory is removed.
+.BR .forest-workspace.toml ,
+are reported and preserved; only an empty workspace directory with no active
+child workspaces is removed.
 Use
 .B delete
 to remove the workspace and its local files.

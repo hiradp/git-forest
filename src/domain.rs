@@ -165,6 +165,7 @@ pub struct WorkspaceListEntry {
     pub name: String,
     pub path: PathBuf,
     pub exists: bool,
+    pub parent: Option<String>,
     pub repositories: Vec<WorkspaceListRepository>,
     #[serde(rename = "unexpected_entries")]
     pub workspace_entries: Vec<PathBuf>,
@@ -194,6 +195,7 @@ pub struct WorkspaceStatusEntry {
     pub name: String,
     pub path: PathBuf,
     pub exists: bool,
+    pub parent: Option<String>,
     pub repositories: Vec<RepositoryStatus>,
     #[serde(rename = "unexpected_entries")]
     pub workspace_entries: Vec<PathBuf>,
@@ -228,9 +230,11 @@ pub struct WorkspacePathReport {
 pub struct WorkspaceAttachReport {
     pub workspace: String,
     pub path: PathBuf,
+    pub parent: Option<String>,
     pub herdr_workspace_id: String,
     pub status: AttachStatus,
     pub tabs: Vec<AttachedTabReport>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
