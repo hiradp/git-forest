@@ -2553,11 +2553,13 @@ fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
     assert_eq!(report["herdr_workspace_id"], "w-project");
     assert_eq!(report["status"], "reconciled");
     assert_eq!(report["tabs"][0]["label"], "2-topic");
-    assert!(
-        !calls.iter().any(|call| {
-            call.starts_with("workspace\tcreate") || call.starts_with("tab\tcreate")
-        })
-    );
+    assert!(!calls.iter().any(|call| {
+        call.starts_with("workspace\tcreate")
+            || (call.starts_with("tab\tcreate")
+                && call.contains(&format!("\t--cwd\t{}\t", topic.display())))
+    }));
+    assert_eq!(report["descendants"][0]["workspace"], "slot");
+    assert_eq!(report["descendants"][0]["herdr_workspace_id"], "w-project");
     assert!(calls.contains(&"tab\trename\tw-project:t-topic\t2-topic".to_owned()));
     assert_eq!(
         &calls[calls.len() - 2..],
@@ -2665,7 +2667,7 @@ fn attaches_a_workspace_and_its_descendants_in_one_herdr_workspace() {
 
     let output = herdr
         .command(&fixture.root)
-        .args(["attach", "project", "--children", "--json"])
+        .args(["attach", "project", "--json"])
         .output()
         .unwrap();
 
@@ -2731,7 +2733,7 @@ fn leaves_an_open_descendant_in_place_and_opens_new_ones_beside_the_root() {
         .command(&fixture.root)
         .env("HERDR_TABS_RESPONSE", tabs.to_string())
         .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "project", "--children", "--json"])
+        .args(["attach", "project", "--json"])
         .output()
         .unwrap();
 
@@ -2769,7 +2771,7 @@ fn checks_every_descendant_before_contacting_herdr() {
 
     let output = herdr
         .command(&fixture.root)
-        .args(["attach", "project", "--children", "--json"])
+        .args(["attach", "project", "--json"])
         .output()
         .unwrap();
 
@@ -2790,7 +2792,7 @@ fn checks_every_descendant_before_contacting_herdr() {
 
     let output = herdr
         .command(&fixture.root)
-        .args(["attach", "project", "--children", "--json"])
+        .args(["attach", "project", "--json"])
         .output()
         .unwrap();
 
@@ -2799,7 +2801,7 @@ fn checks_every_descendant_before_contacting_herdr() {
 }
 
 #[test]
-fn rerunning_attach_children_opens_only_what_is_missing() {
+fn rerunning_attach_opens_only_missing_descendants() {
     let fixture = WorkspaceFixture::new();
     create_attach_tree(&fixture);
     let workspaces = serde_json::json!({"result": {"workspaces": [
@@ -2820,7 +2822,7 @@ fn rerunning_attach_children_opens_only_what_is_missing() {
         .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
         .env("HERDR_TABS_RESPONSE", tabs.to_string())
         .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "project", "--children", "--json"])
+        .args(["attach", "project", "--json"])
         .output()
         .unwrap();
 

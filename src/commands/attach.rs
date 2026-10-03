@@ -51,9 +51,7 @@ pub fn run(
         }
     };
     let mut descendants = Vec::new();
-    if arguments.children {
-        collect_descendants(config, &states, &arguments.workspace, &mut descendants)?;
-    }
+    collect_descendants(config, &states, &arguments.workspace, &mut descendants)?;
 
     let current = herdr.current_workspace_id();
     let attachment = attach_one(herdr, &root, Placement::Current { current, parent })?;
@@ -90,7 +88,7 @@ enum Placement<'a> {
         current: Option<String>,
         parent: Option<&'a WorkspaceState>,
     },
-    /// In this Herdr workspace, which holds the root of an `--children` run.
+    /// In this Herdr workspace, which holds the attached root.
     Host(String),
 }
 

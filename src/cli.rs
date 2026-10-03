@@ -318,10 +318,6 @@ pub struct AttachArgs {
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
-    /// Also attach every descendant workspace in the same Herdr workspace
-    #[arg(long)]
-    pub children: bool,
-
     #[command(flatten)]
     pub output: OutputArgs,
 }

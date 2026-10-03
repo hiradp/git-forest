@@ -155,7 +155,7 @@ git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch 
 git forest list [--archived] [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
-git forest attach <workspace> [--children] [--json]
+git forest attach <workspace> [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
 git forest unarchive <workspace> [<checkout>...] [--archive <ID>] [--as <workspace>] [--symbol <symbol>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
@@ -471,23 +471,19 @@ symbol, new Herdr workspaces use the plain workspace name and existing Herdr
 names are left alone. Each attachment repairs the tab's numeric prefix from its
 current Herdr position.
 
-Attaching a parent opens only the parent. If a saved parent is not an active
-workspace, Forest prints a warning and ignores it; JSON reports carry the
-warning in `warnings`. Parents that form a cycle are rejected before Forest
-contacts Herdr.
+If a saved parent is not an active workspace, Forest prints a warning and
+ignores it; JSON reports carry the warning in `warnings`. Parents that form a
+cycle are rejected before Forest contacts Herdr.
 
-Pass `--children` to open a workspace and all of its descendants together:
-
-```sh
-git forest attach q4-storage --children
-```
-
-The workspace attaches by the rules above. Each descendant then opens as a tab
-in that same Herdr workspace, depth-first in name order. A descendant that is
-already open stays where it is, even in another Herdr workspace, because Herdr
-cannot move tabs between workspaces. Only the named workspace is focused.
-Forest checks every workspace in the tree before contacting Herdr. If Herdr
-fails partway, rerunning the command opens only what is missing.
+Attaching a workspace also opens all of its descendants. The workspace attaches
+by the rules above. Each descendant then opens as a tab in that same Herdr
+workspace, depth-first in name order. A descendant that is already open stays
+where it is, even in another Herdr workspace, because Herdr cannot move tabs
+between workspaces. Only the named workspace is focused. Forest checks every
+workspace in the tree before contacting Herdr, so a descendant with invalid
+metadata or inconsistent worktrees blocks attaching its ancestors until it is
+fixed. If Herdr fails partway, rerunning the command opens only what is
+missing.
 
 Forest records a fixed-length identifier derived from the canonical workspace
 path in Herdr's runtime metadata: on the Herdr workspace for a workspace opened
@@ -898,8 +894,9 @@ before an action could be selected. A branch created to track an explicit
 ```
 
 `tabs` always holds the single attached tab. `parent` is the saved parent, or
-`null`. With `--children`, `descendants` lists a report of the same shape for
-each descendant in attach order; each carries its own `herdr_workspace_id`.
+`null`. `descendants` lists a report of the same shape for each descendant in
+attach order, and is empty for a workspace without children; each carries its
+own `herdr_workspace_id`.
 Workspace and tab status is one of `created`, `reused`, or `reconciled`.
 
 ### Rename

@@ -176,7 +176,7 @@ ahead/behind counts.
 .BI path " workspace"
 Print the absolute path of an existing workspace.
 .TP
-.BI attach " workspace [\-\-children]"
+.BI attach " workspace"
 Open an existing workspace in a running Herdr session as a single tab rooted in
 the workspace directory.
 If the workspace is already open, Forest focuses it.
@@ -189,9 +189,7 @@ Otherwise, Forest creates a Herdr workspace whose only tab is
 A saved symbol prefixes the Herdr workspace name and is reconciled on each
 attachment. Without a symbol, existing Herdr workspace names are left alone.
 A missing parent produces a warning; cyclic parents are rejected.
-With
-.BR \-\-children ,
-also open every descendant as a tab in the same Herdr workspace, depth-first in
+Every descendant also opens as a tab in the same Herdr workspace, depth-first in
 name order; descendants that are already open stay where they are.
 Every workspace in the tree is checked before Herdr is contacted, and rerunning
 after a failure opens only what is missing.
