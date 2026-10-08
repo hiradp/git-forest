@@ -205,10 +205,12 @@ fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> R
         }
         (None, Some(pane)) => reattach_tab(herdr, pane, display_name, path),
         (None, None) => {
-            let untagged_tab = recoverable_tab(herdr, &panes, display_name, path)?;
-            let recoverable = match untagged_tab {
+            // A partial standalone workspace's only tab can carry the
+            // workspace's name, so it is checked before child tabs.
+            let recoverable = recoverable_workspace(herdr, &workspaces, name, path)?;
+            let untagged_tab = match recoverable {
                 Some(_) => None,
-                None => recoverable_workspace(herdr, &workspaces, name, path)?,
+                None => recoverable_tab(herdr, &panes, display_name, path)?,
             };
             let host = match placement {
                 Placement::Host(host) => Some(host),
@@ -279,14 +281,13 @@ fn create_standalone(
     let workspace_id = created.workspace.id;
     herdr.report_workspace_id(&workspace_id, &identity.id)?;
     herdr.report_tab_role(&created.root_pane.id, MAIN_ROLE)?;
-    let label = tab_label(created.tab.number, MAIN_ROLE);
-    if created.tab.label != label {
-        herdr.rename_tab(&created.tab.id, &label)?;
+    if created.tab.label != MAIN_ROLE {
+        herdr.rename_tab(&created.tab.id, MAIN_ROLE)?;
     }
     Ok(Attachment {
         herdr_workspace_id: workspace_id,
         status: AttachStatus::Created,
-        tab: tab_report(label, path, created.tab.id, AttachStatus::Created),
+        tab: tab_report(MAIN_ROLE, path, created.tab.id, AttachStatus::Created),
     })
 }
 
@@ -297,23 +298,12 @@ fn create_tab(
     display_name: &str,
     path: &Path,
 ) -> Result<Attachment> {
-    let next_number = herdr
-        .tabs(workspace_id)?
-        .iter()
-        .map(|tab| tab.number)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let created = herdr.create_tab(workspace_id, path, &tab_label(next_number, display_name))?;
+    let created = herdr.create_tab(workspace_id, path, display_name)?;
     herdr.report_tab_role(&created.root_pane.id, role)?;
-    let label = tab_label(created.tab.number, display_name);
-    if created.tab.label != label {
-        herdr.rename_tab(&created.tab.id, &label)?;
-    }
     Ok(Attachment {
         herdr_workspace_id: workspace_id.to_owned(),
         status: AttachStatus::Created,
-        tab: tab_report(label, path, created.tab.id, AttachStatus::Created),
+        tab: tab_report(display_name, path, created.tab.id, AttachStatus::Created),
     })
 }
 
@@ -324,17 +314,16 @@ fn reattach_tab(
     path: &Path,
 ) -> Result<Attachment> {
     let tab = find_tab(herdr, pane)?;
-    let label = tab_label(tab.number, display_name);
-    let status = if tab.label == label {
+    let status = if tab.label == display_name {
         AttachStatus::Reused
     } else {
-        herdr.rename_tab(&tab.id, &label)?;
+        herdr.rename_tab(&tab.id, display_name)?;
         AttachStatus::Reconciled
     };
     Ok(Attachment {
         herdr_workspace_id: pane.workspace_id.clone(),
         status,
-        tab: tab_report(label, path, tab.id, status),
+        tab: tab_report(display_name, path, tab.id, status),
     })
 }
 
@@ -402,25 +391,20 @@ fn reattach_standalone(
         }
     };
 
-    let (tab_id, label, tab_status) = match main {
+    let (tab_id, tab_status) = match main {
         Some(tab) => {
-            let label = tab_label(tab.number, MAIN_ROLE);
-            if tab.label == label {
-                (tab.id, label, AttachStatus::Reused)
+            if tab.label == MAIN_ROLE {
+                (tab.id, AttachStatus::Reused)
             } else {
-                herdr.rename_tab(&tab.id, &label)?;
+                herdr.rename_tab(&tab.id, MAIN_ROLE)?;
                 changed = true;
-                (tab.id, label, AttachStatus::Reconciled)
+                (tab.id, AttachStatus::Reconciled)
             }
         }
         None => {
             let created = create_tab(herdr, &existing.id, MAIN_ROLE, MAIN_ROLE, path)?;
             changed = true;
-            (
-                created.tab.herdr_tab_id,
-                created.tab.label,
-                AttachStatus::Created,
-            )
+            (created.tab.herdr_tab_id, AttachStatus::Created)
         }
     };
 
@@ -436,7 +420,7 @@ fn reattach_standalone(
         } else {
             AttachStatus::Reused
         },
-        tab: tab_report(label, path, tab_id, tab_status),
+        tab: tab_report(MAIN_ROLE, path, tab_id, tab_status),
     })
 }
 
@@ -451,7 +435,7 @@ fn recoverable_tab(
     let mut recoverable = herdr
         .all_tabs()?
         .into_iter()
-        .filter(|tab| tab.label == tab_label(tab.number, display_name))
+        .filter(|tab| tab.label == display_name)
         .filter(|tab| {
             !panes
                 .iter()
@@ -559,18 +543,9 @@ fn workspace_role(identity: &Identity<'_>) -> String {
     format!("{WORKSPACE_ROLE_PREFIX}{}", identity.id)
 }
 
-fn tab_label(number: usize, name: &str) -> String {
-    format!("{number}-{name}")
-}
-
-fn tab_report(
-    label: String,
-    path: &Path,
-    tab_id: String,
-    status: AttachStatus,
-) -> AttachedTabReport {
+fn tab_report(label: &str, path: &Path, tab_id: String, status: AttachStatus) -> AttachedTabReport {
     AttachedTabReport {
-        label,
+        label: label.to_owned(),
         path: path.to_path_buf(),
         herdr_tab_id: tab_id,
         status,

@@ -1367,7 +1367,7 @@ mod tests {
             herdr_workspace_id: "w1".to_owned(),
             status: AttachStatus::Created,
             tabs: vec![tab(
-                "1-main",
+                "main",
                 "/workspaces/project",
                 "w1:t1",
                 AttachStatus::Created,
@@ -1377,17 +1377,12 @@ mod tests {
                 descendant(
                     "topic",
                     "w1",
-                    tab(
-                        "2-topic",
-                        "/workspaces/topic",
-                        "w1:t2",
-                        AttachStatus::Created,
-                    ),
+                    tab("topic", "/workspaces/topic", "w1:t2", AttachStatus::Created),
                 ),
                 descendant(
                     "other",
                     "w2",
-                    tab("1-main", "/workspaces/other", "w2:t1", AttachStatus::Reused),
+                    tab("main", "/workspaces/other", "w2:t1", AttachStatus::Reused),
                 ),
             ],
         };
@@ -1402,9 +1397,9 @@ mod tests {
                 "Path       /workspaces/project\n",
                 "Herdr      w1\n",
                 "\n",
-                "  ✓ 1-main   created  /workspaces/project\n",
-                "  ✓ 2-topic  created  /workspaces/topic\n",
-                "  ✓ 1-main   reused   /workspaces/other  (Herdr w2)\n",
+                "  ✓ main   created  /workspaces/project\n",
+                "  ✓ topic  created  /workspaces/topic\n",
+                "  ✓ main   reused   /workspaces/other  (Herdr w2)\n",
             )
         );
     }

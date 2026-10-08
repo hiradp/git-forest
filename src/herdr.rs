@@ -35,7 +35,6 @@ pub struct HerdrTab {
     #[serde(rename = "tab_id")]
     pub id: String,
     pub label: String,
-    pub number: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

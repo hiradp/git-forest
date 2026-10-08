@@ -62,7 +62,7 @@ case "$1:$2" in
       if [ "$previous" = "--label" ]; then label="$argument"; fi
       previous="$argument"
     done
-    printf '{"result":{"workspace":{"workspace_id":"w-new"},"tab":{"tab_id":"w-new:t-main","label":"%s","number":1,"pane_count":1},"root_pane":{"pane_id":"w-new:p-main","tab_id":"w-new:t-main"}}}\n' "$label"
+    printf '{"result":{"workspace":{"workspace_id":"w-new"},"tab":{"tab_id":"w-new:t-main","label":"%s","pane_count":1},"root_pane":{"pane_id":"w-new:p-main","tab_id":"w-new:t-main"}}}\n' "$label"
     ;;
   tab:list)
     if [ -n "${HERDR_TABS_RESPONSE:-}" ]; then
@@ -80,9 +80,7 @@ case "$1:$2" in
       if [ "$previous" = "--workspace" ]; then workspace="$argument"; fi
       previous="$argument"
     done
-    number=${label%%-*}
-    suffix=${label#*-}
-    printf '{"result":{"tab":{"tab_id":"%s:t-%s","label":"%s","number":%s,"pane_count":1},"root_pane":{"pane_id":"%s:p-%s","tab_id":"%s:t-%s"}}}\n' "$workspace" "$suffix" "$label" "$number" "$workspace" "$suffix" "$workspace" "$suffix"
+    printf '{"result":{"tab":{"tab_id":"%s:t-%s","label":"%s","pane_count":1},"root_pane":{"pane_id":"%s:p-%s","tab_id":"%s:t-%s"}}}\n' "$workspace" "$label" "$label" "$workspace" "$label" "$workspace" "$label"
     ;;
   pane:list)
     if [ -n "${HERDR_PANES_RESPONSE:-}" ]; then
@@ -2007,7 +2005,7 @@ fn attaches_a_standalone_workspace_as_a_single_main_tab() {
     assert_eq!(
         report["tabs"],
         serde_json::json!([{
-            "label": "1-main",
+            "label": "main",
             "path": path(&fixture.workspace("topic")),
             "herdr_tab_id": "w-new:t-main",
             "status": "created"
@@ -2029,7 +2027,7 @@ fn attaches_a_standalone_workspace_as_a_single_main_tab() {
                 .to_owned()
         )
     );
-    assert!(calls.contains(&"tab\trename\tw-new:t-main\t1-main".to_owned()));
+    assert!(calls.contains(&"tab\trename\tw-new:t-main\tmain".to_owned()));
     assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
     assert_eq!(
         &calls[calls.len() - 2..],
@@ -2049,8 +2047,8 @@ fn adopts_an_old_layout_workspace_without_touching_repository_tabs() {
         "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
     }]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 1},
-        {"tab_id": "w-existing:t-alpha", "label": "alpha-old", "number": 2, "pane_count": 1}
+        {"tab_id": "w-existing:t-main", "label": "main", "pane_count": 1},
+        {"tab_id": "w-existing:t-alpha", "label": "alpha-old", "pane_count": 1}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-existing:p-main", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "tokens": {"git_forest_tab": "main"}},
@@ -2103,8 +2101,8 @@ fn recovers_the_main_tab_after_its_tagged_root_pane_is_closed() {
         "tokens": {"git_forest_id": herdr_id(&workspace)}
     }]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 2},
-        {"tab_id": "w-existing:t-child", "label": "2-child", "number": 2, "pane_count": 1}
+        {"tab_id": "w-existing:t-main", "label": "main", "pane_count": 2},
+        {"tab_id": "w-existing:t-child", "label": "child", "pane_count": 1}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-existing:p-first", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "cwd": workspace_path},
@@ -2168,7 +2166,7 @@ fn recovers_an_untagged_partial_herdr_workspace() {
         let tabs = serde_json::json!({
             "result": {
                 "tabs": [
-                    {"tab_id": "w-partial:t-main", "label": "topic", "number": 1, "pane_count": 1}
+                    {"tab_id": "w-partial:t-main", "label": "topic", "pane_count": 1}
                 ]
             }
         });
@@ -2209,7 +2207,7 @@ fn recovers_an_untagged_partial_herdr_workspace() {
         herdr_id(&fixture.workspace("topic"))
     )));
         assert!(calls.contains(&"pane\treport-metadata\tw-partial:p-main\t--source\tgit-forest\t--token\tgit_forest_tab=main".to_owned()));
-        assert!(calls.contains(&"tab\trename\tw-partial:t-main\t1-main".to_owned()));
+        assert!(calls.contains(&"tab\trename\tw-partial:t-main\tmain".to_owned()));
         let renames = calls
             .iter()
             .filter(|call| call.starts_with("workspace\trename"))
@@ -2240,7 +2238,7 @@ fn rejects_ambiguous_partial_herdr_workspaces_with_earlier_symbols() {
         {"workspace_id": "w-second", "label": "🔥 topic"}
     ]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "t-main", "label": "topic", "number": 1}
+        {"tab_id": "t-main", "label": "topic"}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "p-main", "tab_id": "t-main", "cwd": path(&fixture.workspace("topic"))}
@@ -2268,7 +2266,6 @@ fn rejects_ambiguous_partial_herdr_workspaces_with_earlier_symbols() {
         [
             "workspace\tlist",
             "pane\tlist",
-            "tab\tlist",
             "tab\tlist\t--workspace\tw-first",
             "pane\tlist\t--workspace\tw-first",
             "tab\tlist\t--workspace\tw-second",
@@ -2355,9 +2352,9 @@ fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
         let tabs = serde_json::json!({
             "result": {
                 "tabs": [
-                    {"tab_id": "w-existing:t-main", "label": "1-main", "number": 1, "pane_count": 1},
-                    {"tab_id": "w-existing:t-alpha", "label": "2-alpha", "number": 2, "pane_count": 1},
-                    {"tab_id": "w-existing:t-beta", "label": "3-beta", "number": 3, "pane_count": 1}
+                    {"tab_id": "w-existing:t-main", "label": "main", "pane_count": 1},
+                    {"tab_id": "w-existing:t-alpha", "label": "alpha", "pane_count": 1},
+                    {"tab_id": "w-existing:t-beta", "label": "beta", "pane_count": 1}
                 ]
             }
         });
@@ -2433,7 +2430,7 @@ fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
         "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}
     }]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1}
+        {"tab_id": "w-project:t-main", "label": "main"}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}}
@@ -2465,9 +2462,9 @@ fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
         let calls = herdr.calls();
         if current == Some("w-project") {
             assert_eq!(report["herdr_workspace_id"], "w-project");
-            assert_eq!(report["tabs"][0]["label"], "2-🌲 topic");
+            assert_eq!(report["tabs"][0]["label"], "🌲 topic");
             assert!(calls.contains(&format!(
-                "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\t2-🌲 topic\t--no-focus",
+                "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
                 topic.display()
             )));
             assert!(calls.contains(&format!(
@@ -2488,7 +2485,7 @@ fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
             );
         } else {
             assert_eq!(report["herdr_workspace_id"], "w-new");
-            assert_eq!(report["tabs"][0]["label"], "1-main");
+            assert_eq!(report["tabs"][0]["label"], "main");
             assert!(calls.contains(&format!(
                 "workspace\tcreate\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
                 topic.display()
@@ -2511,7 +2508,7 @@ fn opens_a_child_as_a_tab_in_an_untagged_parent_herdr_workspace() {
     ));
     let project = fixture.workspace("project");
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1}
+        {"tab_id": "w-project:t-main", "label": "main"}
     ]}});
     // Two panes in the main tab, so the parent is not a recoverable partial workspace.
     let panes = |cwd: &Path| {
@@ -2555,7 +2552,7 @@ fn opens_a_child_as_a_tab_in_an_untagged_parent_herdr_workspace() {
         );
         if nested {
             assert_eq!(report["herdr_workspace_id"], "w-project");
-            assert_eq!(report["tabs"][0]["label"], "2-topic");
+            assert_eq!(report["tabs"][0]["label"], "topic");
             assert!(calls.contains(&tags_parent));
             assert!(
                 !calls
@@ -2585,8 +2582,8 @@ fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
         {"workspace_id": "w-elsewhere"}
     ]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1},
-        {"tab_id": "w-project:t-topic", "label": "2-old", "number": 2}
+        {"tab_id": "w-project:t-main", "label": "main"},
+        {"tab_id": "w-project:t-topic", "label": "old"}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}},
@@ -2613,9 +2610,9 @@ fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
     let (report, calls) = attach(0, "slot", "w-project");
 
     assert_eq!(report["herdr_workspace_id"], "w-project");
-    assert_eq!(report["tabs"][0]["label"], "3-slot");
+    assert_eq!(report["tabs"][0]["label"], "slot");
     assert!(calls.contains(&format!(
-        "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\t3-slot\t--no-focus",
+        "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\tslot\t--no-focus",
         fixture.workspace("slot").display()
     )));
 
@@ -2623,7 +2620,7 @@ fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
 
     assert_eq!(report["herdr_workspace_id"], "w-project");
     assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["label"], "2-topic");
+    assert_eq!(report["tabs"][0]["label"], "topic");
     assert!(!calls.iter().any(|call| {
         call.starts_with("workspace\tcreate")
             || (call.starts_with("tab\tcreate")
@@ -2631,7 +2628,7 @@ fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
     }));
     assert_eq!(report["descendants"][0]["workspace"], "slot");
     assert_eq!(report["descendants"][0]["herdr_workspace_id"], "w-project");
-    assert!(calls.contains(&"tab\trename\tw-project:t-topic\t2-topic".to_owned()));
+    assert!(calls.contains(&"tab\trename\tw-project:t-topic\ttopic".to_owned()));
     assert_eq!(
         &calls[calls.len() - 2..],
         [
@@ -2655,9 +2652,9 @@ fn recovers_a_child_tab_after_its_tagged_pane_is_closed() {
         {"workspace_id": "w-project", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}}
     ]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1},
-        {"tab_id": "w-project:t-topic", "label": "2-topic", "number": 2},
-        {"tab_id": "w-project:t-owned", "label": "3-topic", "number": 3}
+        {"tab_id": "w-project:t-main", "label": "main"},
+        {"tab_id": "w-project:t-topic", "label": "topic"},
+        {"tab_id": "w-project:t-owned", "label": "topic"}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}},
@@ -2715,7 +2712,7 @@ fn recovers_a_child_tab_after_its_tagged_pane_is_closed() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["herdr_workspace_id"], "w-project");
     assert!(herdr.calls().iter().any(|call| {
-        call.starts_with("tab\tcreate\t--workspace\tw-project\t") && call.contains("\t4-slot\t")
+        call.starts_with("tab\tcreate\t--workspace\tw-project\t") && call.contains("\tslot\t")
     }));
 }
 
@@ -2792,7 +2789,7 @@ fn leaves_an_open_descendant_in_place_and_opens_new_ones_beside_the_root() {
     create_attach_tree(&fixture);
     let topic = fixture.workspace("topic");
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-other:t-topic", "label": "1-topic", "number": 1}
+        {"tab_id": "w-other:t-topic", "label": "topic"}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-other:p-topic", "workspace_id": "w-other", "tab_id": "w-other:t-topic", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&topic))}}
@@ -2879,8 +2876,8 @@ fn rerunning_attach_opens_only_missing_descendants() {
         {"workspace_id": "w-root", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}}
     ]}});
     let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-root:t-main", "label": "1-main", "number": 1},
-        {"tab_id": "w-root:t-other", "label": "2-other", "number": 2}
+        {"tab_id": "w-root:t-main", "label": "main"},
+        {"tab_id": "w-root:t-other", "label": "other"}
     ]}});
     let panes = serde_json::json!({"result": {"panes": [
         {"pane_id": "w-root:p-main", "workspace_id": "w-root", "tab_id": "w-root:t-main", "tokens": {"git_forest_tab": "main"}},

@@ -463,7 +463,7 @@ directory. Forest does not start commands. Where the tab goes depends on where
    workspace that lost its Forest tokens still counts as the parent when its
    label names the parent and one of its panes is rooted in the parent's
    directory; Forest tags it again.
-3. Otherwise, Forest creates a Herdr workspace whose only tab is `1-main`.
+3. Otherwise, Forest creates a Herdr workspace whose only tab is `main`.
 
 Forest identifies the Herdr workspace that `attach` runs in from
 `HERDR_WORKSPACE_ID`, which Herdr sets in its panes. Outside Herdr, the third
@@ -471,17 +471,17 @@ rule always applies.
 
 ```text
 Herdr: 🗺 q4-storage
-  1-main
-  2-🌲 logical-slots
-  3-slot-tests
+  main
+  🌲 logical-slots
+  slot-tests
 ```
 
-A child tab is labeled with its position, the workspace's symbol if it has one,
-and its name, such as `2-🌲 logical-slots`. A workspace opened as its own Herdr
+A child tab is labeled with the workspace's symbol if it has one and its name,
+such as `🌲 logical-slots`. A workspace opened as its own Herdr
 workspace is named with its symbol and a space before its name. Without a
 symbol, new Herdr workspaces use the plain workspace name and existing Herdr
-names are left alone. Each attachment repairs the tab's numeric prefix from its
-current Herdr position.
+names are left alone. Each attachment renames a managed tab whose label has
+drifted.
 
 If a saved parent is not an active workspace, Forest prints a warning and
 ignores it; JSON reports carry the warning in `warnings`. Parents that form a
@@ -895,7 +895,7 @@ before an action could be selected. A branch created to track an explicit
   "status": "created",
   "tabs": [
     {
-      "label": "2-🌲 logical-slots",
+      "label": "🌲 logical-slots",
       "path": "/project/src/.workspaces/logical-slots",
       "herdr_tab_id": "w1:t2",
       "status": "created"
