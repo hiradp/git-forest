@@ -459,7 +459,10 @@ directory. Forest does not start commands. Where the tab goes depends on where
    a tab, Forest focuses it and never opens a second copy.
 2. Otherwise, if the Herdr workspace that `attach` runs in has the workspace's
    parent open, either as that Herdr workspace or as one of its tabs, Forest
-   adds a tab there. This applies from any tab in that Herdr workspace.
+   adds a tab there. This applies from any tab in that Herdr workspace. A Herdr
+   workspace that lost its Forest tokens still counts as the parent when its
+   label names the parent and one of its panes is rooted in the parent's
+   directory; Forest tags it again.
 3. Otherwise, Forest creates a Herdr workspace whose only tab is `1-main`.
 
 Forest identifies the Herdr workspace that `attach` runs in from

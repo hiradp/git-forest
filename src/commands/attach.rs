@@ -225,18 +225,30 @@ fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> R
                     let parent_untagged_here =
                         recoverable_tab(herdr, &panes, &parent_display_name, &parent_path)?
                             .is_some_and(|pane| pane.workspace_id == current);
-                    workspaces
-                        .iter()
-                        .find(|workspace| workspace.id == current)
-                        .filter(|workspace| {
-                            parent_untagged_here
-                                || hosts_standalone(workspace, &parent_identity)
-                                || panes.iter().any(|pane| {
-                                    pane.workspace_id == workspace.id
-                                        && has_role(pane, &workspace_role(&parent_identity))
-                                })
-                        })
-                        .map(|workspace| workspace.id.clone())
+                    let here = workspaces.iter().find(|workspace| workspace.id == current);
+                    let untagged_parent = here.filter(|workspace| {
+                        is_untagged_standalone(workspace, &parent.name)
+                            && panes.iter().any(|pane| {
+                                pane.workspace_id == workspace.id
+                                    && pane
+                                        .cwd
+                                        .as_deref()
+                                        .is_some_and(|cwd| paths_match(cwd, &parent_path))
+                            })
+                    });
+                    if let Some(workspace) = untagged_parent {
+                        herdr.report_workspace_id(&workspace.id, &parent_identity.id)?;
+                    }
+                    here.filter(|workspace| {
+                        untagged_parent.is_some()
+                            || parent_untagged_here
+                            || hosts_standalone(workspace, &parent_identity)
+                            || panes.iter().any(|pane| {
+                                pane.workspace_id == workspace.id
+                                    && has_role(pane, &workspace_role(&parent_identity))
+                            })
+                    })
+                    .map(|workspace| workspace.id.clone())
                 }
                 Placement::Current { .. } => None,
             };
@@ -474,16 +486,10 @@ fn recoverable_workspace(
     workspace_path: &Path,
 ) -> Result<Option<HerdrWorkspace>> {
     let mut recoverable = Vec::new();
-    for workspace in workspaces.iter().filter(|workspace| {
-        !workspace.tokens.contains_key(WORKSPACE_ID_TOKEN)
-            && !workspace.tokens.contains_key(WORKSPACE_PATH_TOKEN)
-            && workspace.label.as_deref().is_some_and(|label| {
-                label == workspace_name
-                    || label.split_once(' ').is_some_and(|(symbol, name)| {
-                        name == workspace_name && workspace::validate_symbol(symbol).is_ok()
-                    })
-            })
-    }) {
+    for workspace in workspaces
+        .iter()
+        .filter(|workspace| is_untagged_standalone(workspace, workspace_name))
+    {
         let tabs = herdr.tabs(&workspace.id)?;
         let panes = herdr.panes(&workspace.id)?;
         if tabs.len() == 1
@@ -504,6 +510,19 @@ fn recoverable_workspace(
         )));
     }
     Ok(recoverable.into_iter().next())
+}
+
+/// A Herdr workspace without Forest tokens whose label names the workspace,
+/// with or without a symbol.
+fn is_untagged_standalone(workspace: &HerdrWorkspace, workspace_name: &str) -> bool {
+    !workspace.tokens.contains_key(WORKSPACE_ID_TOKEN)
+        && !workspace.tokens.contains_key(WORKSPACE_PATH_TOKEN)
+        && workspace.label.as_deref().is_some_and(|label| {
+            label == workspace_name
+                || label.split_once(' ').is_some_and(|(symbol, name)| {
+                    name == workspace_name && workspace::validate_symbol(symbol).is_ok()
+                })
+        })
 }
 
 fn find_tab(herdr: &Herdr, pane: &HerdrPane) -> Result<HerdrTab> {

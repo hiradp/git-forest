@@ -2499,6 +2499,77 @@ fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
 }
 
 #[test]
+fn opens_a_child_as_a_tab_in_an_untagged_parent_herdr_workspace() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "project", "--symbol", "🔧"],
+    ));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--parent", "project"],
+    ));
+    let project = fixture.workspace("project");
+    let tabs = serde_json::json!({"result": {"tabs": [
+        {"tab_id": "w-project:t-main", "label": "1-main", "number": 1}
+    ]}});
+    // Two panes in the main tab, so the parent is not a recoverable partial workspace.
+    let panes = |cwd: &Path| {
+        serde_json::json!({"result": {"panes": [
+            {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "cwd": path(cwd)},
+            {"pane_id": "w-project:p-split", "workspace_id": "w-project", "tab_id": "w-project:t-main", "cwd": path(cwd)}
+        ]}})
+    };
+
+    for (index, (label, cwd, nested)) in [
+        ("🔧 project", project.as_path(), true),
+        ("🔧 project", fixture.root.as_path(), false),
+        ("unrelated", project.as_path(), false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let herdr_root = fixture.root.join(format!("herdr-{index}"));
+        fs::create_dir(&herdr_root).unwrap();
+        let herdr = FakeHerdr::new(&herdr_root);
+        let workspaces = serde_json::json!({"result": {"workspaces": [
+            {"workspace_id": "w-project", "label": label}
+        ]}});
+
+        let output = herdr
+            .command(&fixture.root)
+            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
+            .env("HERDR_TABS_RESPONSE", tabs.to_string())
+            .env("HERDR_PANES_RESPONSE", panes(cwd).to_string())
+            .env("HERDR_WORKSPACE_ID", "w-project")
+            .args(["attach", "topic", "--json"])
+            .output()
+            .unwrap();
+
+        assert_success(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let calls = herdr.calls();
+        let tags_parent = format!(
+            "workspace\treport-metadata\tw-project\t--source\tgit-forest\t--token\tgit_forest_id={}",
+            herdr_id(&project)
+        );
+        if nested {
+            assert_eq!(report["herdr_workspace_id"], "w-project");
+            assert_eq!(report["tabs"][0]["label"], "2-topic");
+            assert!(calls.contains(&tags_parent));
+            assert!(
+                !calls
+                    .iter()
+                    .any(|call| call.starts_with("workspace\tcreate"))
+            );
+        } else {
+            assert_eq!(report["herdr_workspace_id"], "w-new");
+            assert!(!calls.contains(&tags_parent));
+        }
+    }
+}
+
+#[test]
 fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
     let fixture = WorkspaceFixture::new();
     for arguments in [
