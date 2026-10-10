@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::ArgValueCompleter;
 
 use crate::completion;
-use crate::config::CheckoutId;
+use crate::config::{CheckoutId, Multiplexer};
 
 #[derive(Debug, Parser)]
 #[command(name = "git-forest", version, about)]
@@ -62,7 +62,7 @@ pub enum Command {
     /// Print a workspace path
     Path(PathArgs),
 
-    /// Open a workspace in Herdr
+    /// Open a workspace in Herdr or Rex
     Attach(AttachArgs),
 
     /// Rename a workspace without renaming its branches
@@ -193,7 +193,7 @@ pub struct CreateArgs {
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
-    /// Emoji or symbol to prefix the Herdr workspace name
+    /// Emoji or symbol to prefix the workspace name in Herdr or Rex
     #[arg(long, value_name = "SYMBOL")]
     pub symbol: Option<String>,
 
@@ -317,6 +317,11 @@ pub struct AttachArgs {
     /// Workspace name
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
+
+    /// Terminal multiplexer to open the workspace in, overriding
+    /// configuration and detection
+    #[arg(long, value_enum, value_name = "MULTIPLEXER")]
+    pub multiplexer: Option<Multiplexer>,
 
     #[command(flatten)]
     pub output: OutputArgs,

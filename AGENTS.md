@@ -12,6 +12,9 @@ configured canonical repositories.
 - Clear inherited repository-routing Git environment variables before nested
   Git commands.
 - Do not add implicit `fetch`, `pull`, clone, or other network operations.
+- Never start or stop a Herdr or Rex server. Pass `--autostart=false` to every
+  Rex command, and address Rex sessions, windows, and blocks by ID, never by
+  label.
 - Creation must preflight every requested repository before mutation and remain
   safe to rerun after partial execution.
 - Removal must use `git worktree remove`, preserve branches, and reject
@@ -29,10 +32,12 @@ configured canonical repositories.
 - `src/config.rs`: discovery, TOML parsing, templates, and path policy.
 - `src/git.rs`: all Git subprocess invocation and porcelain parsing.
 - `src/herdr.rs`: Herdr subprocess invocation and JSON response parsing.
+- `src/rex.rs`: Rex subprocess invocation and JSON response parsing.
 - `src/workspace.rs`: reconciliation of filesystem and Git worktree state.
 - `src/domain.rs`: serializable reports.
 - `src/output.rs`: human and JSON rendering.
-- `src/commands/`: command behavior.
+- `src/commands/`: command behavior. `attach.rs` holds multiplexer selection,
+  shared preflight, and Herdr placement; `attach/rex.rs` holds Rex placement.
 - `tests/cli.rs`: temporary-repository integration coverage.
 
 Command implementations should inspect state and return typed reports rather

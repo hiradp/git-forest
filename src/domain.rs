@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::config::Multiplexer;
+
 #[derive(Debug, Serialize)]
 pub struct RepositoriesReport {
     pub repositories: Vec<RepositoryReport>,
@@ -232,7 +234,11 @@ pub struct WorkspaceAttachReport {
     pub workspace: String,
     pub path: PathBuf,
     pub parent: Option<String>,
-    pub herdr_workspace_id: String,
+    pub multiplexer: Multiplexer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub herdr_workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rex_session_id: Option<String>,
     pub status: AttachStatus,
     pub tabs: Vec<AttachedTabReport>,
     pub warnings: Vec<String>,
@@ -243,8 +249,21 @@ pub struct WorkspaceAttachReport {
 pub struct AttachedTabReport {
     pub label: String,
     pub path: PathBuf,
-    pub herdr_tab_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub herdr_tab_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rex_window_id: Option<String>,
     pub status: AttachStatus,
+}
+
+impl WorkspaceAttachReport {
+    /// The Herdr workspace or Rex session holding the attached tab.
+    pub fn host_id(&self) -> &str {
+        self.herdr_workspace_id
+            .as_deref()
+            .or(self.rex_session_id.as_deref())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

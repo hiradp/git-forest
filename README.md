@@ -15,7 +15,7 @@ explicitly starts the same launcher. Forest contacts remotes only for explicit
 start runtime services, or maintain a separate worktree registry. Git worktree
 metadata and the filesystem are authoritative. The launcher and the explicit
 `attach` command can create or focus a workspace in a running
-[Herdr](https://herdr.dev) session.
+[Herdr](https://herdr.dev) or [Rex](https://www.superlogical.com/rex) session.
 
 ## Installation
 
@@ -113,6 +113,19 @@ projects that provision repositories separately. It is required by `setup`
 when a canonical clone is missing. Relative local remotes are resolved from the
 directory containing `.forest.toml`.
 
+An optional `[attach]` table chooses where `attach` and the launcher open
+workspaces:
+
+```toml
+[attach]
+multiplexer = "rex"
+rex_command = ["/opt/homebrew/bin/fish"]
+```
+
+`multiplexer` is `herdr` or `rex`. `rex_command` is the program and arguments
+each terminal Forest opens in Rex runs; without it Rex starts your login shell.
+See [`attach`](#attach) for how Forest chooses when `multiplexer` is unset.
+
 The only supported placeholders are:
 
 - `{name}` in `repositories.remote`;
@@ -155,7 +168,7 @@ git forest add <workspace> <checkout>... [--base <checkout>=<ref>]... [--branch 
 git forest list [--archived] [--json]
 git forest status [<workspace>] [--json]
 git forest path <workspace> [--json]
-git forest attach <workspace> [--json]
+git forest attach <workspace> [--multiplexer herdr|rex] [--json]
 git forest rename <workspace> <new-workspace> [--json]
 git forest archive <workspace> [--force] [--json]
 git forest unarchive <workspace> [<checkout>...] [--archive <ID>] [--as <workspace>] [--symbol <symbol>] [--base <checkout>=<ref>]... [--branch <checkout>=<branch>]... [--json]
@@ -177,7 +190,7 @@ Global options:
 
 Run `git forest` in a terminal to open the workspace launcher. `git forest open`
 is the explicit equivalent. Start typing to fuzzy-search workspaces, then press
-enter to attach the selected workspace in Herdr.
+enter to attach the selected workspace in Herdr or Rex.
 
 ```text
   🌲 Forest
@@ -289,7 +302,8 @@ git forest create scratch
 git forest add scratch api
 ```
 
-Assign an emoji or symbol for the Herdr workspace name with `--symbol`:
+Assign an emoji or symbol for the Herdr workspace or Rex session name with
+`--symbol`:
 
 ```sh
 git forest create logical-slots api operator --symbol "🌲"
@@ -447,9 +461,20 @@ The workspace must exist.
 
 ### `attach`
 
-Opens an existing Forest workspace in Herdr. The `herdr` executable must be on
-`PATH`, and a Herdr server for the current session must already be running.
-Forest never starts or stops the server.
+Opens an existing Forest workspace in Herdr or Rex. Forest chooses the
+multiplexer from the first of these that applies:
+
+1. `--multiplexer herdr` or `--multiplexer rex`.
+2. `attach.multiplexer` in `.forest.toml`.
+3. The multiplexer `attach` runs in: Rex when `REX_SESSION` is set and
+   `HERDR_WORKSPACE_ID` is not.
+4. Herdr.
+
+The launcher has no flag and uses the remaining rules. The rest of this section
+describes Herdr; [Rex](#rex) lists what differs.
+
+The `herdr` executable must be on `PATH`, and a Herdr server for the current
+session must already be running. Forest never starts or stops the server.
 
 A workspace opens as a single tab with one shell pane rooted in the workspace
 directory. Forest does not start commands. Where the tab goes depends on where
@@ -524,6 +549,43 @@ Herdr      w1
   ✓ 2-🌲 logical-slots  created  /project/src/.workspaces/logical-slots
 ```
 
+#### Rex
+
+The `rex` executable must be on `PATH` and a Rex server must already be
+running. Forest passes `--autostart=false` to every Rex command, so it never
+starts the server, and it never stops it.
+
+A Rex session takes the place of a Herdr workspace and a Rex window, which Rex
+shows as a tab, takes the place of a Herdr tab. The same three placement rules
+apply, with `REX_SESSION` identifying the session `attach` runs in: a workspace
+that is already open is focused, a child opens as a tab in its parent's session
+when `attach` runs there, and anything else gets a session of its own whose
+only tab is `main`. Descendants open as tabs in the same session, and Rex
+cannot move a tab between sessions either.
+
+Rex has no runtime metadata, so Forest identifies what is open by label alone:
+
+- A session whose label is the workspace's name, with or without a symbol, is
+  that workspace opened on its own. Its tab labeled `main` is the managed tab,
+  and Forest adds one if none has that label.
+- A tab with such a label in any other session is that workspace opened as a
+  child tab.
+- When more than one session or tab matches, Forest keeps those with a pane
+  whose foreground process is working inside the workspace directory. Anything
+  other than exactly one is rejected.
+
+This costs more than Herdr's tags do. Renaming a managed session or tab in Rex
+makes the next `attach` open a second copy. A session or tab that merely shares
+a workspace's name is treated as that workspace. Workspaces with the same name
+under different workspace roots are told apart only by working directory.
+A saved symbol is reconciled as it is in Herdr: Forest renames the session, and
+a child tab whose label has drifted.
+
+New terminals run your login shell unless `attach.rex_command` names another
+program. After attaching, Forest focuses the tab and asks the Rex app to show
+the session. Rex can only do that when exactly one app is connected; otherwise
+the workspace stays open in the background and Forest reports a warning.
+
 ### `rename`
 
 Renames an active workspace without changing its branches, commits, upstreams,
@@ -549,8 +611,9 @@ than an explicit `--branch` override.
 A Git repair failure can leave the directory at the new path with one or more
 registrations still pointing to the old path. Repeating the same rename command
 recognizes that partial state and resumes repair. Forest does not update Herdr
-runtime metadata, so a later `attach` under the new name may create a new Herdr
-workspace rather than reuse one attached before the rename.
+runtime metadata or Rex labels, so a later `attach` under the new name may
+create a new Herdr workspace or Rex session rather than reuse one attached
+before the rename.
 
 Before moving anything, Forest updates `parent` in every active workspace that
 names the old workspace as its parent, and restores those links if the
@@ -592,7 +655,7 @@ one another. Repeating a successful archive reports `already_archived` and the
 newest generation (or the legacy archive if it is the only one) while no new
 active workspace exists. Archives are excluded from ordinary `list`, the
 interactive launcher, active workspace completion, and `path`; use
-`list --archived` to see them. Forest does not close matching Herdr processes.
+`list --archived` to see them. Forest does not close matching Herdr or Rex processes.
 The archive is local dormant storage, not a compressed archive or backup.
 
 ### `unarchive`
@@ -891,6 +954,7 @@ before an action could be selected. A branch created to track an explicit
   "workspace": "logical-slots",
   "path": "/project/src/.workspaces/logical-slots",
   "parent": "q4-storage",
+  "multiplexer": "herdr",
   "herdr_workspace_id": "w1",
   "status": "created",
   "tabs": [
@@ -909,7 +973,9 @@ before an action could be selected. A branch created to track an explicit
 `tabs` always holds the single attached tab. `parent` is the saved parent, or
 `null`. `descendants` lists a report of the same shape for each descendant in
 attach order, and is empty for a workspace without children; each carries its
-own `herdr_workspace_id`.
+own `herdr_workspace_id`. `multiplexer` is `herdr` or `rex`. A Rex report
+carries `rex_session_id` in place of `herdr_workspace_id` and `rex_window_id`
+in place of `herdr_tab_id`.
 Workspace and tab status is one of `created`, `reused`, or `reconciled`.
 
 ### Rename
@@ -1082,7 +1148,7 @@ for every requested repository.
 ## Exit status
 
 - `0`: successful, including fully idempotent operations;
-- `1`: an operational conflict or Git, Herdr, or filesystem failure;
+- `1`: an operational conflict or Git, Herdr, Rex, or filesystem failure;
 - `2`: usage, input, or configuration error.
 
 ## Development

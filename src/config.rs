@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
-use serde::Deserialize;
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, Result};
 
@@ -17,7 +18,28 @@ pub struct Config {
     pub workspaces_root: PathBuf,
     pub repositories: Vec<RepositoryConfig>,
     pub config_dir: PathBuf,
+    /// The configured terminal multiplexer for `attach`, if any.
+    pub multiplexer: Option<Multiplexer>,
+    /// The program and arguments each new Rex terminal runs instead of the
+    /// login shell.
+    pub rex_command: Vec<String>,
     branch_template: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Multiplexer {
+    Herdr,
+    Rex,
+}
+
+impl Multiplexer {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Herdr => "Herdr",
+            Self::Rex => "Rex",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +103,8 @@ struct RawConfig {
     version: u32,
     repositories: RawRepositories,
     workspaces: RawWorkspaces,
+    #[serde(default)]
+    attach: RawAttach,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +120,14 @@ struct RawRepositories {
 struct RawWorkspaces {
     root: PathBuf,
     branch: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAttach {
+    multiplexer: Option<Multiplexer>,
+    #[serde(default)]
+    rex_command: Vec<String>,
 }
 
 impl Config {
@@ -144,6 +176,12 @@ impl Config {
             ));
         }
 
+        if raw.attach.rex_command.first().is_some_and(String::is_empty) {
+            return Err(AppError::InvalidConfig(
+                "attach.rex_command must start with a program".to_owned(),
+            ));
+        }
+
         let mut seen = HashSet::new();
         for name in &raw.repositories.members {
             validate_component(name, "repository name")?;
@@ -181,6 +219,8 @@ impl Config {
             workspaces_root,
             repositories,
             config_dir: project_root,
+            multiplexer: raw.attach.multiplexer,
+            rex_command: raw.attach.rex_command,
             branch_template: raw.workspaces.branch,
         })
     }
@@ -414,6 +454,7 @@ mod tests {
                 root: PathBuf::from("src/.workspaces"),
                 branch: "user/{workspace}".to_owned(),
             },
+            attach: RawAttach::default(),
         }
     }
 

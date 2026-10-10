@@ -745,8 +745,8 @@ fn render_workspace_attach(
     }
     render_header_field(
         writer,
-        "Herdr",
-        &report.herdr_workspace_id,
+        report.multiplexer.title(),
+        report.host_id(),
         styles.cyan(),
         styles,
     )?;
@@ -757,8 +757,8 @@ fn render_workspace_attach(
         .iter()
         .map(|tab| (tab, None))
         .chain(report.descendants.iter().flat_map(|descendant| {
-            let elsewhere = (descendant.herdr_workspace_id != report.herdr_workspace_id)
-                .then_some(descendant.herdr_workspace_id.as_str());
+            let elsewhere =
+                (descendant.host_id() != report.host_id()).then(|| descendant.host_id());
             descendant.tabs.iter().map(move |tab| (tab, elsewhere))
         }))
         .collect::<Vec<_>>();
@@ -787,11 +787,12 @@ fn render_workspace_attach(
             tab.path.display(),
         )
         .map_err(AppError::WriteOutput)?;
-        if let Some(herdr_workspace_id) = elsewhere {
+        if let Some(host_id) = elsewhere {
             write!(
                 writer,
-                "  {}(Herdr {herdr_workspace_id}){}",
+                "  {}({} {host_id}){}",
                 styles.dim(),
+                report.multiplexer.title(),
                 styles.reset()
             )
             .map_err(AppError::WriteOutput)?;
@@ -1340,6 +1341,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::config::Multiplexer;
     use crate::domain::{AttachedTabReport, RepositoryChangeReport};
 
     #[test]
@@ -1347,14 +1349,17 @@ mod tests {
         let tab = |label: &str, path: &str, id: &str, status| AttachedTabReport {
             label: label.to_owned(),
             path: PathBuf::from(path),
-            herdr_tab_id: id.to_owned(),
+            herdr_tab_id: Some(id.to_owned()),
+            rex_window_id: None,
             status,
         };
         let descendant = |name: &str, herdr: &str, tab| WorkspaceAttachReport {
             workspace: name.to_owned(),
             path: PathBuf::from(format!("/workspaces/{name}")),
             parent: Some("project".to_owned()),
-            herdr_workspace_id: herdr.to_owned(),
+            multiplexer: Multiplexer::Herdr,
+            herdr_workspace_id: Some(herdr.to_owned()),
+            rex_session_id: None,
             status: AttachStatus::Created,
             tabs: vec![tab],
             warnings: Vec::new(),
@@ -1364,7 +1369,9 @@ mod tests {
             workspace: "project".to_owned(),
             path: PathBuf::from("/workspaces/project"),
             parent: None,
-            herdr_workspace_id: "w1".to_owned(),
+            multiplexer: Multiplexer::Herdr,
+            herdr_workspace_id: Some("w1".to_owned()),
+            rex_session_id: None,
             status: AttachStatus::Created,
             tabs: vec![tab(
                 "main",

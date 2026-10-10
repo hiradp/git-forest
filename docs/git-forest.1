@@ -110,7 +110,8 @@ to override a creation base and
 to select an existing local branch or create one from its remote-tracking ref.
 Use
 .BI \-\-symbol " symbol"
-to prefix the Herdr workspace name with an emoji or symbol and a space, and
+to prefix the Herdr workspace or Rex session name with an emoji or symbol and a
+space, and
 .BI \-\-parent " workspace"
 to record an active workspace as this workspace's parent.
 Parents may nest to any depth; a parent that would form a cycle is rejected.
@@ -180,9 +181,18 @@ ahead/behind counts.
 .BI path " workspace"
 Print the absolute path of an existing workspace.
 .TP
-.BI attach " workspace"
-Open an existing workspace in a running Herdr session as a single tab rooted in
-the workspace directory.
+.BI attach " workspace [\-\-multiplexer herdr|rex]"
+Open an existing workspace in a running Herdr or Rex session as a single tab
+rooted in the workspace directory.
+Forest uses the multiplexer named by
+.BR \-\-multiplexer ,
+then
+.B attach.multiplexer
+in the configuration, then Rex when
+.B REX_SESSION
+is set and
+.B HERDR_WORKSPACE_ID
+is not, and otherwise Herdr.
 If the workspace is already open, Forest focuses it.
 Otherwise, if the Herdr workspace named by
 .B HERDR_WORKSPACE_ID
@@ -197,6 +207,20 @@ Every descendant also opens as a tab in the same Herdr workspace, depth-first in
 name order; descendants that are already open stay where they are.
 Every workspace in the tree is checked before Herdr is contacted, and rerunning
 after a failure opens only what is missing.
+.IP
+In Rex, a session takes the place of a Herdr workspace, a window takes the
+place of a tab, and
+.B REX_SESSION
+names the session
+.B attach
+runs in.
+Rex has no runtime metadata, so Forest recognizes an open workspace by its
+session or tab label, and settles duplicate labels by which one has a pane
+working inside the workspace directory; anything still ambiguous is rejected.
+A session or tab renamed in Rex is no longer recognized.
+Forest never starts the Rex server.
+If Rex cannot switch an app to the session, the workspace stays open and Forest
+prints a warning.
 .TP
 .BI rename " workspace new-workspace"
 Rename an active workspace without changing its branches or working tree
@@ -213,7 +237,7 @@ resumes the incomplete repair.
 Before moving anything, rename updates
 .B parent
 in each active child, restoring it if the directory move fails.
-Forest does not update Herdr runtime metadata.
+Forest does not update Herdr runtime metadata or Rex labels.
 .TP
 .BI archive " workspace [\-\-force]"
 Remove every clean registered worktree in a workspace, preserve its branches,
@@ -416,7 +440,7 @@ Completion honors normal configuration discovery,
 .BR FOREST_CONFIG ,
 and
 .BR \-\-config .
-It never contacts remotes, mutates worktrees, or invokes Herdr.
+It never contacts remotes, mutates worktrees, or invokes Herdr or Rex.
 Regenerate the setup after upgrading Forest.
 .SH CONFIGURATION
 Forest reads a
@@ -441,6 +465,18 @@ and the workspace branch template may use
 and
 .BR {checkout} .
 The latter is the named slot when present and otherwise the workspace name.
+An optional
+.B [attach]
+table sets
+.BR multiplexer ,
+either
+.B herdr
+or
+.BR rex ,
+and
+.BR rex_command ,
+the program and arguments each terminal Forest opens in Rex runs instead of the
+login shell.
 See the git-forest README for the complete format and policy.
 .SH ENVIRONMENT
 .TP
@@ -455,14 +491,19 @@ Disable colored human-readable output.
 .B PATH
 Used to find Git and, for
 .BR attach ,
-the Herdr executable.
+the Herdr or Rex executable.
+.TP
+.BR HERDR_WORKSPACE_ID ", " REX_SESSION
+Set by Herdr and Rex in their terminals.
+.B attach
+reads them to find the Herdr workspace or Rex session it runs in.
 .SH EXIT STATUS
 .TP
 .B 0
 Success, including fully idempotent operations.
 .TP
 .B 1
-An operational conflict or a Git, Herdr, or filesystem failure.
+An operational conflict or a Git, Herdr, Rex, or filesystem failure.
 .TP
 .B 2
 A usage, input, or configuration error.

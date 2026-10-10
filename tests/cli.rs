@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -114,6 +115,7 @@ esac
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_TAB_ID")
             .env_remove("HERDR_PANE_ID")
+            .env_remove("REX_SESSION")
             .env("PATH", command_path)
             .env("HERDR_FAKE_LOG", &self.log);
         command
@@ -124,6 +126,171 @@ esac
             .unwrap()
             .lines()
             .map(str::to_owned)
+            .collect()
+    }
+}
+
+struct FakeRex {
+    bin: PathBuf,
+    state: PathBuf,
+}
+
+impl FakeRex {
+    /// Answers from files in its state directory: `sessions.json`,
+    /// `windows-<session>.json`, and `cwd-<block>`.
+    fn new(root: &Path) -> Self {
+        let bin = root.join("fake-rex-bin");
+        let state = root.join("fake-rex-state");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&state).unwrap();
+        let executable = bin.join("rex");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ -n "${GIT_DIR:-}" ]; then
+  printf 'inherited GIT_DIR\n' >&2
+  exit 1
+fi
+
+{
+  separator=""
+  for argument in "$@"; do
+    printf '%s%s' "$separator" "$argument"
+    separator="$(printf '\t')"
+  done
+  printf '\n'
+} >> "$REX_FAKE_STATE/calls.log"
+
+if [ "$1" = "--autostart=false" ]; then shift; fi
+
+value_after() {
+  flag="$1"
+  shift
+  previous=""
+  for argument in "$@"; do
+    if [ "$previous" = "$flag" ]; then printf '%s' "$argument"; return; fi
+    previous="$argument"
+  done
+}
+
+case "$1:$2" in
+  ls:*)
+    if [ -f "$REX_FAKE_STATE/sessions.json" ]; then
+      cat "$REX_FAKE_STATE/sessions.json"
+    else
+      printf '{"sessions":[]}\n'
+    fi
+    ;;
+  window:ls)
+    windows="$REX_FAKE_STATE/windows-$(value_after --session "$@").json"
+    if [ -f "$windows" ]; then
+      cat "$windows"
+    else
+      printf '{"windows":[]}\n'
+    fi
+    ;;
+  new:*)
+    printf '{"session_id":"s-new","initial_windows":[{"window_id":"s-new:w-main","block_ids":["s-new:b-main"],"revision":1}]}\n'
+    ;;
+  window:new)
+    printf '{"window_id":"%s:w-%s","block_ids":["b-new"],"revision":2}\n' "$(value_after --session "$@")" "$5"
+    ;;
+  block:call)
+    cwd="$REX_FAKE_STATE/cwd-$(value_after --block "$@")"
+    if [ -f "$cwd" ]; then
+      printf '{"foreground":{"cwd":"%s"}}\n' "$(cat "$cwd")"
+    else
+      printf '{"foreground":null}\n'
+    fi
+    ;;
+  do:*)
+    if [ -f "$REX_FAKE_STATE/do-fails" ]; then
+      printf 'Error: no app client is connected\n\nUsage:\n  rex do\n' >&2
+      exit 1
+    fi
+    ;;
+  *)
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        Self { bin, state }
+    }
+
+    /// Puts this Rex ahead of whatever the command's `PATH` already holds.
+    fn install(&self, command: &mut Command) {
+        let existing_path = command
+            .get_envs()
+            .find_map(|(name, value)| (name == "PATH").then(|| value.map(OsStr::to_owned)))
+            .flatten()
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let mut paths = vec![self.bin.clone()];
+        paths.extend(std::env::split_paths(&existing_path));
+        command
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("REX_FAKE_STATE", &self.state);
+    }
+
+    fn command(&self, current_dir: &Path) -> Command {
+        let mut command = Command::new(binary());
+        command
+            .current_dir(current_dir)
+            .env_remove("FOREST_CONFIG")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("REX_SESSION");
+        self.install(&mut command);
+        command
+    }
+
+    fn sessions(&self, sessions: Value) {
+        fs::write(
+            self.state.join("sessions.json"),
+            serde_json::json!({ "sessions": sessions }).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Each window is `(window_id, label, block_id)`.
+    fn windows(&self, session: &str, windows: &[(&str, &str, &str)]) {
+        let windows = windows
+            .iter()
+            .map(|(id, label, block)| {
+                serde_json::json!({
+                    "window_id": id,
+                    "label": label,
+                    "layers": [{"blocks": [{"block_id": block}]}]
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            self.state.join(format!("windows-{session}.json")),
+            serde_json::json!({ "windows": windows }).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn cwd(&self, block: &str, cwd: &Path) {
+        fs::write(self.state.join(format!("cwd-{block}")), path(cwd)).unwrap();
+    }
+
+    fn called(&self) -> bool {
+        self.state.join("calls.log").exists()
+    }
+
+    fn calls(&self) -> Vec<String> {
+        fs::read_to_string(self.state.join("calls.log"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                line.strip_prefix("--autostart=false\t")
+                    .unwrap_or_else(|| panic!("{line:?} could start a Rex server"))
+                    .to_owned()
+            })
             .collect()
     }
 }
@@ -2714,6 +2881,352 @@ fn recovers_a_child_tab_after_its_tagged_pane_is_closed() {
     assert!(herdr.calls().iter().any(|call| {
         call.starts_with("tab\tcreate\t--workspace\tw-project\t") && call.contains("\tslot\t")
     }));
+}
+
+fn configure_attach(fixture: &WorkspaceFixture, settings: &str) {
+    let config = fixture.root.join(".forest.toml");
+    let contents = fs::read_to_string(&config).unwrap();
+    fs::write(config, format!("{contents}\n[attach]\n{settings}\n")).unwrap();
+}
+
+fn is_rex_mutation(call: &str) -> bool {
+    ["new\t", "window\tnew", "window\trename", "session\trename"]
+        .iter()
+        .any(|prefix| call.starts_with(prefix))
+}
+
+#[test]
+fn chooses_the_multiplexer_from_flag_then_config_then_environment() {
+    // (flag, configured, inside Herdr, inside Rex, expected)
+    let cases = [
+        (None, None, false, false, "herdr"),
+        (None, None, false, true, "rex"),
+        (None, None, true, true, "herdr"),
+        (None, Some("rex"), true, false, "rex"),
+        (Some("herdr"), Some("rex"), false, true, "herdr"),
+        (Some("rex"), Some("herdr"), true, false, "rex"),
+    ];
+    for (flag, configured, in_herdr, in_rex, expected) in cases {
+        let fixture = WorkspaceFixture::new();
+        assert_success(&forest(&fixture.root, &["create", "topic"]));
+        if let Some(configured) = configured {
+            configure_attach(&fixture, &format!("multiplexer = {configured:?}"));
+        }
+        let herdr = FakeHerdr::new(&fixture.root);
+        let rex = FakeRex::new(&fixture.root);
+        let mut command = herdr.command(&fixture.root);
+        rex.install(&mut command);
+        command.args(["attach", "topic", "--json"]);
+        if let Some(flag) = flag {
+            command.args(["--multiplexer", flag]);
+        }
+        if in_herdr {
+            command.env("HERDR_WORKSPACE_ID", "w-other");
+        }
+        if in_rex {
+            command.env("REX_SESSION", "s-other");
+        }
+
+        let output = command.output().unwrap();
+
+        let case = format!("{flag:?} {configured:?} {in_herdr} {in_rex}");
+        assert_success(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["multiplexer"], expected, "{case}");
+        assert_eq!(rex.called(), expected == "rex", "{case}");
+        assert_eq!(herdr.log.exists(), expected == "herdr", "{case}");
+    }
+}
+
+#[test]
+fn attaches_a_standalone_workspace_as_a_rex_session() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "alpha", "--symbol", "🌲"],
+    ));
+    configure_attach(&fixture, r#"rex_command = ["/bin/fish", "--login"]"#);
+    let rex = FakeRex::new(&fixture.root);
+    let topic = fixture.workspace("topic");
+
+    let output = rex
+        .command(&fixture.root)
+        .env("GIT_DIR", fixture.root.join("unrelated.git"))
+        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "workspace": "topic",
+            "path": path(&topic),
+            "parent": null,
+            "multiplexer": "rex",
+            "rex_session_id": "s-new",
+            "status": "created",
+            "tabs": [{
+                "label": "main",
+                "path": path(&topic),
+                "rex_window_id": "s-new:w-main",
+                "status": "created"
+            }],
+            "warnings": [],
+            "descendants": []
+        })
+    );
+    assert_eq!(
+        rex.calls(),
+        [
+            "ls\t--json".to_owned(),
+            format!(
+                "new\t🌲 topic\t--window\tmain\t--cwd\t{}\t--json\t--\t/bin/fish\t--login",
+                topic.display()
+            ),
+            "window\tfocus\t--session\ts-new\ts-new:w-main".to_owned(),
+            "do\tsession.select\tsession_id=s-new\twindow_id=s-new:w-main".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn reuses_and_reconciles_a_workspace_already_open_in_rex() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "project"]));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--parent", "project", "--symbol", "🌲"],
+    ));
+    let rex = FakeRex::new(&fixture.root);
+    rex.sessions(serde_json::json!([
+        {"session_id": "s-desk", "label": "main"},
+        {"session_id": "s-project", "label": "project"}
+    ]));
+    rex.windows("s-desk", &[("s-desk:w-1", "notes", "b-notes")]);
+    rex.windows(
+        "s-project",
+        &[
+            ("s-project:w-main", "main", "b-main"),
+            ("s-project:w-topic", "topic", "b-topic"),
+        ],
+    );
+
+    let output = rex
+        .command(&fixture.root)
+        .args(["attach", "project", "--multiplexer", "rex", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["rex_session_id"], "s-project");
+    assert_eq!(report["status"], "reused");
+    assert_eq!(report["tabs"][0]["rex_window_id"], "s-project:w-main");
+    assert_eq!(report["tabs"][0]["status"], "reused");
+    let topic = &report["descendants"][0];
+    assert_eq!(topic["rex_session_id"], "s-project");
+    assert_eq!(topic["status"], "reconciled");
+    assert_eq!(topic["tabs"][0]["label"], "🌲 topic");
+    assert_eq!(topic["tabs"][0]["rex_window_id"], "s-project:w-topic");
+    let calls = rex.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| is_rex_mutation(call))
+            .collect::<Vec<_>>(),
+        ["window\trename\t--session\ts-project\ts-project:w-topic\t🌲 topic"]
+    );
+    assert_eq!(
+        calls[calls.len() - 2],
+        "window\tfocus\t--session\ts-project\ts-project:w-main"
+    );
+}
+
+#[test]
+fn renames_a_rex_session_whose_workspace_gained_a_symbol() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--symbol", "🌲"],
+    ));
+    let rex = FakeRex::new(&fixture.root);
+    rex.sessions(serde_json::json!([{"session_id": "s-topic", "label": "topic"}]));
+    rex.windows("s-topic", &[("s-topic:w-shell", "shell", "b-shell")]);
+
+    let output = rex
+        .command(&fixture.root)
+        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "reconciled");
+    assert_eq!(report["tabs"][0]["status"], "created");
+    assert_eq!(report["tabs"][0]["rex_window_id"], "s-topic:w-main");
+    let calls = rex.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| is_rex_mutation(call))
+            .collect::<Vec<_>>(),
+        [
+            &format!(
+                "window\tnew\t--session\ts-topic\tmain\t--cwd\t{}\t--focus=false\t--json",
+                fixture.workspace("topic").display()
+            ),
+            "session\trename\ts-topic\t🌲 topic"
+        ]
+    );
+}
+
+#[test]
+fn opens_a_child_as_a_tab_only_from_inside_its_parents_rex_session() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "project"]));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--parent", "project"],
+    ));
+    let topic = fixture.workspace("topic");
+
+    for (index, current) in [Some("s-project"), Some("s-desk"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let rex_root = fixture.root.join(format!("rex-{index}"));
+        fs::create_dir(&rex_root).unwrap();
+        let rex = FakeRex::new(&rex_root);
+        rex.sessions(serde_json::json!([
+            {"session_id": "s-desk", "label": "main"},
+            {"session_id": "s-project", "label": "project"}
+        ]));
+        rex.windows("s-project", &[("s-project:w-main", "main", "b-main")]);
+        let mut command = rex.command(&fixture.root);
+        command.args(["attach", "topic", "--multiplexer", "rex", "--json"]);
+        if let Some(current) = current {
+            command.env("REX_SESSION", current);
+        }
+
+        let output = command.output().unwrap();
+
+        assert_success(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let calls = rex.calls();
+        if current == Some("s-project") {
+            assert_eq!(report["rex_session_id"], "s-project");
+            assert_eq!(report["tabs"][0]["label"], "topic");
+            assert!(calls.contains(&format!(
+                "window\tnew\t--session\ts-project\ttopic\t--cwd\t{}\t--focus=false\t--json",
+                topic.display()
+            )));
+            assert!(!calls.iter().any(|call| call.starts_with("new\t")));
+        } else {
+            assert_eq!(report["rex_session_id"], "s-new", "{current:?}");
+            assert_eq!(report["tabs"][0]["label"], "main");
+            assert!(!calls.iter().any(|call| call.starts_with("window\tnew")));
+        }
+    }
+}
+
+#[test]
+fn opens_descendants_as_tabs_in_the_new_rex_session() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "project"]));
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--parent", "project"],
+    ));
+    let rex = FakeRex::new(&fixture.root);
+
+    let output = rex
+        .command(&fixture.root)
+        .args(["attach", "project", "--multiplexer", "rex", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["rex_session_id"], "s-new");
+    assert_eq!(report["descendants"][0]["rex_session_id"], "s-new");
+    assert_eq!(
+        report["descendants"][0]["tabs"][0]["rex_window_id"],
+        "s-new:w-topic"
+    );
+    let calls = rex.calls();
+    assert!(calls.contains(&format!(
+        "window\tnew\t--session\ts-new\ttopic\t--cwd\t{}\t--focus=false\t--json",
+        fixture.workspace("topic").display()
+    )));
+    assert_eq!(
+        calls[calls.len() - 1],
+        "do\tsession.select\tsession_id=s-new\twindow_id=s-new:w-main"
+    );
+}
+
+#[test]
+fn resolves_duplicate_rex_labels_by_working_directory_or_rejects_them() {
+    for rooted in [true, false] {
+        let fixture = WorkspaceFixture::new();
+        assert_success(&forest(&fixture.root, &["create", "topic", "alpha"]));
+        let rex = FakeRex::new(&fixture.root);
+        rex.sessions(serde_json::json!([
+            {"session_id": "s-one", "label": "topic"},
+            {"session_id": "s-two", "label": "topic"}
+        ]));
+        rex.windows("s-one", &[("s-one:w-main", "main", "b-one")]);
+        rex.windows("s-two", &[("s-two:w-main", "main", "b-two")]);
+        rex.cwd("b-one", &fixture.root);
+        if rooted {
+            rex.cwd("b-two", &fixture.workspace("topic").join("alpha"));
+        }
+
+        let output = rex
+            .command(&fixture.root)
+            .args(["attach", "topic", "--multiplexer", "rex", "--json"])
+            .output()
+            .unwrap();
+
+        let calls = rex.calls();
+        if rooted {
+            assert_success(&output);
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["rex_session_id"], "s-two");
+            assert_eq!(report["status"], "reused");
+        } else {
+            assert_eq!(output.status.code(), Some(1));
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            let message = error["error"]["message"].as_str().unwrap();
+            assert!(message.contains("s-one, s-two"), "{message}");
+            assert!(!calls.iter().any(|call| call.starts_with("window\tfocus")));
+        }
+        assert!(!calls.iter().any(|call| is_rex_mutation(call)));
+    }
+}
+
+#[test]
+fn warns_when_no_rex_app_can_switch_to_the_session() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "topic"]));
+    let rex = FakeRex::new(&fixture.root);
+    fs::write(rex.state.join("do-fails"), "").unwrap();
+
+    let output = rex
+        .command(&fixture.root)
+        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "created");
+    let warning = report["warnings"][0].as_str().unwrap();
+    assert!(
+        warning.contains("s-new") && warning.contains("no app client is connected"),
+        "{warning}"
+    );
 }
 
 fn create_attach_tree(fixture: &WorkspaceFixture) {

@@ -56,6 +56,19 @@ pub enum AppError {
         source: serde_json::Error,
     },
 
+    #[error("Rex command failed to start: {0}")]
+    StartRex(#[source] std::io::Error),
+
+    #[error("{context}: {message}")]
+    Rex { context: String, message: String },
+
+    #[error("{context}: could not parse Rex response: {source}")]
+    ParseRex {
+        context: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("{0}")]
     Operational(String),
 

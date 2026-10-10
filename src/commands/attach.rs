@@ -1,7 +1,9 @@
+mod rex;
+
 use std::path::{Path, PathBuf};
 
 use crate::cli::AttachArgs;
-use crate::config::Config;
+use crate::config::{Config, Multiplexer};
 use crate::domain::{
     AttachStatus, AttachedTabReport, CommandOutcome, CommandReport, WorkspaceAttachReport,
 };
@@ -11,15 +13,24 @@ use crate::herdr::{
     self, Herdr, HerdrPane, HerdrTab, HerdrWorkspace, TAB_TOKEN, WORKSPACE_ID_TOKEN,
     WORKSPACE_PATH_TOKEN,
 };
+use crate::rex::Rex;
 use crate::workspace::{self, Ancestry, WorkspaceMetadata, WorkspaceState};
 
 const MAIN_ROLE: &str = "main";
 const WORKSPACE_ROLE_PREFIX: &str = "workspace:";
 
 struct Attachment {
-    herdr_workspace_id: String,
+    /// The Herdr workspace or Rex session holding the tab.
+    host_id: String,
     status: AttachStatus,
-    tab: AttachedTabReport,
+    tab: AttachedTab,
+}
+
+struct AttachedTab {
+    label: String,
+    path: PathBuf,
+    id: String,
+    status: AttachStatus,
 }
 
 pub fn run(
@@ -53,26 +64,64 @@ pub fn run(
     let mut descendants = Vec::new();
     collect_descendants(config, &states, &arguments.workspace, &mut descendants)?;
 
-    let current = herdr.current_workspace_id();
-    let attachment = attach_one(herdr, &root, Placement::Current { current, parent })?;
-    let mut descendant_reports = Vec::with_capacity(descendants.len());
-    for target in &descendants {
-        let host = Placement::Host(attachment.herdr_workspace_id.clone());
-        let attached = attach_one(herdr, target, host)?;
-        descendant_reports.push(report(target, attached, Vec::new()));
-    }
+    let multiplexer = multiplexer(config, herdr, arguments);
+    let (attachment, attached_descendants) = match multiplexer {
+        Multiplexer::Herdr => attach_tree(herdr, &root, parent, &descendants)?,
+        Multiplexer::Rex => {
+            let rex = Rex::new(&config.rex_command);
+            rex::attach_tree(&rex, &root, parent, &descendants, &mut warnings)?
+        }
+    };
 
-    herdr.focus_workspace(&attachment.herdr_workspace_id)?;
-    herdr.focus_tab(&attachment.tab.herdr_tab_id)?;
-
-    let mut root_report = report(&root, attachment, warnings);
-    root_report.descendants = descendant_reports;
+    let mut root_report = report(multiplexer, &root, attachment, warnings);
+    root_report.descendants = descendants
+        .iter()
+        .zip(attached_descendants)
+        .map(|(target, attached)| report(multiplexer, target, attached, Vec::new()))
+        .collect();
     Ok(CommandOutcome::success(CommandReport::WorkspaceAttach(
         root_report,
     )))
 }
 
-/// A workspace checked before any Herdr call.
+/// The `--multiplexer` flag, then configuration, then the multiplexer `attach`
+/// runs in, then Herdr.
+fn multiplexer(config: &Config, herdr: &Herdr, arguments: &AttachArgs) -> Multiplexer {
+    arguments
+        .multiplexer
+        .or(config.multiplexer)
+        .unwrap_or_else(|| {
+            if herdr.current_workspace_id().is_none() && Rex::current_session_id().is_some() {
+                Multiplexer::Rex
+            } else {
+                Multiplexer::Herdr
+            }
+        })
+}
+
+fn attach_tree(
+    herdr: &Herdr,
+    root: &Target<'_>,
+    parent: Option<&WorkspaceState>,
+    descendants: &[Target<'_>],
+) -> Result<(Attachment, Vec<Attachment>)> {
+    for target in std::iter::once(root).chain(descendants) {
+        Identity::new(&target.path)?;
+    }
+    let current = herdr.current_workspace_id();
+    let attachment = attach_one(herdr, root, Placement::Current { current, parent })?;
+    let mut attached = Vec::with_capacity(descendants.len());
+    for target in descendants {
+        let host = Placement::Host(attachment.host_id.clone());
+        attached.push(attach_one(herdr, target, host)?);
+    }
+
+    herdr.focus_workspace(&attachment.host_id)?;
+    herdr.focus_tab(&attachment.tab.id)?;
+    Ok((attachment, attached))
+}
+
+/// A workspace checked before any Herdr or Rex call.
 struct Target<'a> {
     state: &'a WorkspaceState,
     metadata: WorkspaceMetadata,
@@ -83,12 +132,13 @@ struct Target<'a> {
 }
 
 enum Placement<'a> {
-    /// Beside the parent when it is open in the Herdr workspace `attach` runs in.
+    /// Beside the parent when it is open in the Herdr workspace or Rex session
+    /// `attach` runs in.
     Current {
         current: Option<String>,
         parent: Option<&'a WorkspaceState>,
     },
-    /// In this Herdr workspace, which holds the attached root.
+    /// In this Herdr workspace or Rex session, which holds the attached root.
     Host(String),
 }
 
@@ -113,7 +163,6 @@ fn preflight<'a>(config: &Config, states: &'a [WorkspaceState], name: &str) -> R
     }
     let metadata = workspace::read_metadata(&state.path)?;
     let path = canonicalize(&state.path, "Forest workspace")?;
-    Identity::new(&path)?;
     let display_name = match &metadata.symbol {
         Some(symbol) => format!("{symbol} {name}"),
         None => name.to_owned(),
@@ -143,17 +192,33 @@ fn collect_descendants<'a>(
 }
 
 fn report(
+    multiplexer: Multiplexer,
     target: &Target<'_>,
     attachment: Attachment,
     warnings: Vec<String>,
 ) -> WorkspaceAttachReport {
+    let herdr = |id: String| (multiplexer == Multiplexer::Herdr).then_some(id);
+    let rex = |id: String| (multiplexer == Multiplexer::Rex).then_some(id);
+    let Attachment {
+        host_id,
+        status,
+        tab,
+    } = attachment;
     WorkspaceAttachReport {
         workspace: target.state.name.clone(),
         path: target.configured_path.clone(),
         parent: target.metadata.parent.clone(),
-        herdr_workspace_id: attachment.herdr_workspace_id,
-        status: attachment.status,
-        tabs: vec![attachment.tab],
+        multiplexer,
+        herdr_workspace_id: herdr(host_id.clone()),
+        rex_session_id: rex(host_id),
+        status,
+        tabs: vec![AttachedTabReport {
+            label: tab.label,
+            path: tab.path,
+            herdr_tab_id: herdr(tab.id.clone()),
+            rex_window_id: rex(tab.id),
+            status: tab.status,
+        }],
         warnings,
         descendants: Vec::new(),
     }
@@ -285,7 +350,7 @@ fn create_standalone(
         herdr.rename_tab(&created.tab.id, MAIN_ROLE)?;
     }
     Ok(Attachment {
-        herdr_workspace_id: workspace_id,
+        host_id: workspace_id,
         status: AttachStatus::Created,
         tab: tab_report(MAIN_ROLE, path, created.tab.id, AttachStatus::Created),
     })
@@ -301,7 +366,7 @@ fn create_tab(
     let created = herdr.create_tab(workspace_id, path, display_name)?;
     herdr.report_tab_role(&created.root_pane.id, role)?;
     Ok(Attachment {
-        herdr_workspace_id: workspace_id.to_owned(),
+        host_id: workspace_id.to_owned(),
         status: AttachStatus::Created,
         tab: tab_report(display_name, path, created.tab.id, AttachStatus::Created),
     })
@@ -321,7 +386,7 @@ fn reattach_tab(
         AttachStatus::Reconciled
     };
     Ok(Attachment {
-        herdr_workspace_id: pane.workspace_id.clone(),
+        host_id: pane.workspace_id.clone(),
         status,
         tab: tab_report(display_name, path, tab.id, status),
     })
@@ -404,7 +469,7 @@ fn reattach_standalone(
         None => {
             let created = create_tab(herdr, &existing.id, MAIN_ROLE, MAIN_ROLE, path)?;
             changed = true;
-            (created.tab.herdr_tab_id, AttachStatus::Created)
+            (created.tab.id, AttachStatus::Created)
         }
     };
 
@@ -414,7 +479,7 @@ fn reattach_standalone(
     }
 
     Ok(Attachment {
-        herdr_workspace_id: existing.id.clone(),
+        host_id: existing.id.clone(),
         status: if changed {
             AttachStatus::Reconciled
         } else {
@@ -496,16 +561,21 @@ fn recoverable_workspace(
     Ok(recoverable.into_iter().next())
 }
 
-/// A Herdr workspace without Forest tokens whose label names the workspace,
-/// with or without a symbol.
+/// A Herdr workspace without Forest tokens whose label names the workspace.
 fn is_untagged_standalone(workspace: &HerdrWorkspace, workspace_name: &str) -> bool {
     !workspace.tokens.contains_key(WORKSPACE_ID_TOKEN)
         && !workspace.tokens.contains_key(WORKSPACE_PATH_TOKEN)
-        && workspace.label.as_deref().is_some_and(|label| {
-            label == workspace_name
-                || label.split_once(' ').is_some_and(|(symbol, name)| {
-                    name == workspace_name && workspace::validate_symbol(symbol).is_ok()
-                })
+        && workspace
+            .label
+            .as_deref()
+            .is_some_and(|label| names_workspace(label, workspace_name))
+}
+
+/// Whether a label is the workspace's name, with or without a symbol.
+fn names_workspace(label: &str, workspace_name: &str) -> bool {
+    label == workspace_name
+        || label.split_once(' ').is_some_and(|(symbol, name)| {
+            name == workspace_name && workspace::validate_symbol(symbol).is_ok()
         })
 }
 
@@ -543,11 +613,11 @@ fn workspace_role(identity: &Identity<'_>) -> String {
     format!("{WORKSPACE_ROLE_PREFIX}{}", identity.id)
 }
 
-fn tab_report(label: &str, path: &Path, tab_id: String, status: AttachStatus) -> AttachedTabReport {
-    AttachedTabReport {
+fn tab_report(label: &str, path: &Path, tab_id: String, status: AttachStatus) -> AttachedTab {
+    AttachedTab {
         label: label.to_owned(),
         path: path.to_path_buf(),
-        herdr_tab_id: tab_id,
+        id: tab_id,
         status,
     }
 }

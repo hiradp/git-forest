@@ -9,6 +9,7 @@ mod git;
 mod herdr;
 mod launcher;
 mod output;
+mod rex;
 mod workspace;
 
 use std::process::ExitCode;
@@ -94,6 +95,7 @@ fn run_launcher(config: &Config) -> Result<u8> {
             execute(
                 &Command::Attach(AttachArgs {
                     workspace,
+                    multiplexer: None,
                     output: OutputArgs { json: false },
                 }),
                 config,
@@ -123,13 +125,14 @@ fn run_launcher(config: &Config) -> Result<u8> {
             execute(
                 &Command::Attach(AttachArgs {
                     workspace: workspace.clone(),
+                    multiplexer: None,
                     output: OutputArgs { json: false },
                 }),
                 config,
             )
             .map_err(|error| {
                 AppError::Operational(format!(
-                    "workspace {workspace:?} was created, but it could not be opened in Herdr: {error}; retry with `git forest attach {workspace}`"
+                    "workspace {workspace:?} was created, but it could not be opened: {error}; retry with `git forest attach {workspace}`"
                 ))
             })
         }
