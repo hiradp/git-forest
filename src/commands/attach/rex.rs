@@ -122,9 +122,9 @@ fn attach_one(rex: &Rex<'_>, target: &Target<'_>, placement: Placement<'_>) -> R
                     (host, tab_report(label, &target.path, window_id, created))
                 }
                 None => {
-                    let session =
-                        rex.create_session(&target.display_name, MAIN_ROLE, &target.path)?;
-                    let tab = tab_report(MAIN_ROLE, &target.path, session.window_id, created);
+                    let label = &target.main_label;
+                    let session = rex.create_session(&target.display_name, label, &target.path)?;
+                    let tab = tab_report(label, &target.path, session.window_id, created);
                     (session.session_id, tab)
                 }
             };
@@ -143,10 +143,11 @@ fn reattach_standalone(
     target: &Target<'_>,
 ) -> Result<Attachment> {
     let path = &target.path;
+    let main_label = &target.main_label;
     let mut mains = session
         .windows
         .iter()
-        .filter(|window| window.label == MAIN_ROLE)
+        .filter(|window| names_workspace(&window.label, MAIN_ROLE))
         .collect::<Vec<_>>();
     if mains.len() > 1 {
         let candidates = join_ids(mains.iter().map(|window| &window.id));
@@ -159,14 +160,18 @@ fn reattach_standalone(
         }
     }
     let (tab_id, tab_status) = match mains.first() {
-        Some(window) => (window.id.clone(), AttachStatus::Reused),
+        Some(window) if &window.label == main_label => (window.id.clone(), AttachStatus::Reused),
+        Some(window) => {
+            rex.rename_window(&session.id, &window.id, main_label)?;
+            (window.id.clone(), AttachStatus::Reconciled)
+        }
         None => (
-            rex.create_window(&session.id, MAIN_ROLE, path)?,
+            rex.create_window(&session.id, main_label, path)?,
             AttachStatus::Created,
         ),
     };
 
-    let mut changed = tab_status == AttachStatus::Created;
+    let mut changed = tab_status != AttachStatus::Reused;
     if target.metadata.symbol.is_some() && session.label != target.display_name {
         rex.rename_session(&session.id, &target.display_name)?;
         changed = true;
@@ -179,7 +184,7 @@ fn reattach_standalone(
         } else {
             AttachStatus::Reused
         },
-        tab: tab_report(MAIN_ROLE, path, tab_id, tab_status),
+        tab: tab_report(main_label, path, tab_id, tab_status),
     })
 }
 

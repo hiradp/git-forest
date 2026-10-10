@@ -129,6 +129,8 @@ struct Target<'a> {
     configured_path: PathBuf,
     path: PathBuf,
     display_name: String,
+    /// The label of the workspace's own tab when it is open standalone.
+    main_label: String,
 }
 
 enum Placement<'a> {
@@ -163,9 +165,9 @@ fn preflight<'a>(config: &Config, states: &'a [WorkspaceState], name: &str) -> R
     }
     let metadata = workspace::read_metadata(&state.path)?;
     let path = canonicalize(&state.path, "Forest workspace")?;
-    let display_name = match &metadata.symbol {
-        Some(symbol) => format!("{symbol} {name}"),
-        None => name.to_owned(),
+    let (display_name, main_label) = match &metadata.symbol {
+        Some(symbol) => (format!("{symbol} {name}"), format!("{symbol} {MAIN_ROLE}")),
+        None => (name.to_owned(), MAIN_ROLE.to_owned()),
     };
     Ok(Target {
         state,
@@ -173,6 +175,7 @@ fn preflight<'a>(config: &Config, states: &'a [WorkspaceState], name: &str) -> R
         configured_path,
         path,
         display_name,
+        main_label,
     })
 }
 
@@ -226,7 +229,6 @@ fn report(
 
 fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> Result<Attachment> {
     let name = &target.state.name;
-    let metadata = &target.metadata;
     let display_name = &target.display_name;
     let path = &target.path;
     let identity = Identity::new(path)?;
@@ -266,7 +268,7 @@ fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> R
             if untagged {
                 herdr.report_workspace_id(&existing.id, &identity.id)?;
             }
-            reattach_standalone(herdr, existing, metadata, display_name, path, untagged)
+            reattach_standalone(herdr, existing, target, untagged)
         }
         (None, Some(pane)) => reattach_tab(herdr, pane, display_name, path),
         (None, None) => {
@@ -326,11 +328,11 @@ fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> R
                 Ok(attachment)
             } else if let Some(existing) = recoverable {
                 herdr.report_workspace_id(&existing.id, &identity.id)?;
-                reattach_standalone(herdr, &existing, metadata, display_name, path, true)
+                reattach_standalone(herdr, &existing, target, true)
             } else if let Some(host) = host {
                 create_tab(herdr, &host, &role, display_name, path)
             } else {
-                create_standalone(herdr, display_name, &identity, path)
+                create_standalone(herdr, target, &identity)
             }
         }
     }
@@ -338,21 +340,22 @@ fn attach_one(herdr: &Herdr, target: &Target<'_>, placement: Placement<'_>) -> R
 
 fn create_standalone(
     herdr: &Herdr,
-    display_name: &str,
+    target: &Target<'_>,
     identity: &Identity<'_>,
-    path: &Path,
 ) -> Result<Attachment> {
-    let created = herdr.create_workspace(path, display_name)?;
+    let path = &target.path;
+    let main_label = &target.main_label;
+    let created = herdr.create_workspace(path, &target.display_name)?;
     let workspace_id = created.workspace.id;
     herdr.report_workspace_id(&workspace_id, &identity.id)?;
     herdr.report_tab_role(&created.root_pane.id, MAIN_ROLE)?;
-    if created.tab.label != MAIN_ROLE {
-        herdr.rename_tab(&created.tab.id, MAIN_ROLE)?;
+    if &created.tab.label != main_label {
+        herdr.rename_tab(&created.tab.id, main_label)?;
     }
     Ok(Attachment {
         host_id: workspace_id,
         status: AttachStatus::Created,
-        tab: tab_report(MAIN_ROLE, path, created.tab.id, AttachStatus::Created),
+        tab: tab_report(main_label, path, created.tab.id, AttachStatus::Created),
     })
 }
 
@@ -395,11 +398,12 @@ fn reattach_tab(
 fn reattach_standalone(
     herdr: &Herdr,
     existing: &HerdrWorkspace,
-    metadata: &workspace::WorkspaceMetadata,
-    display_name: &str,
-    path: &Path,
+    target: &Target<'_>,
     recovered: bool,
 ) -> Result<Attachment> {
+    let display_name = &target.display_name;
+    let main_label = &target.main_label;
+    let path = &target.path;
     let tabs = herdr.tabs(&existing.id)?;
     let panes = herdr.panes(&existing.id)?;
     let tagged = panes
@@ -458,22 +462,22 @@ fn reattach_standalone(
 
     let (tab_id, tab_status) = match main {
         Some(tab) => {
-            if tab.label == MAIN_ROLE {
+            if &tab.label == main_label {
                 (tab.id, AttachStatus::Reused)
             } else {
-                herdr.rename_tab(&tab.id, MAIN_ROLE)?;
+                herdr.rename_tab(&tab.id, main_label)?;
                 changed = true;
                 (tab.id, AttachStatus::Reconciled)
             }
         }
         None => {
-            let created = create_tab(herdr, &existing.id, MAIN_ROLE, MAIN_ROLE, path)?;
+            let created = create_tab(herdr, &existing.id, MAIN_ROLE, main_label, path)?;
             changed = true;
             (created.tab.id, AttachStatus::Created)
         }
     };
 
-    if metadata.symbol.is_some() && existing.label.as_deref() != Some(display_name) {
+    if target.metadata.symbol.is_some() && existing.label.as_deref() != Some(display_name) {
         herdr.rename_workspace(&existing.id, display_name)?;
         changed = true;
     }
@@ -485,7 +489,7 @@ fn reattach_standalone(
         } else {
             AttachStatus::Reused
         },
-        tab: tab_report(MAIN_ROLE, path, tab_id, tab_status),
+        tab: tab_report(main_label, path, tab_id, tab_status),
     })
 }
 

@@ -2374,7 +2374,8 @@ fn recovers_an_untagged_partial_herdr_workspace() {
         herdr_id(&fixture.workspace("topic"))
     )));
         assert!(calls.contains(&"pane\treport-metadata\tw-partial:p-main\t--source\tgit-forest\t--token\tgit_forest_tab=main".to_owned()));
-        assert!(calls.contains(&"tab\trename\tw-partial:t-main\tmain".to_owned()));
+        let main_label = symbol.map_or("main".to_owned(), |symbol| format!("{symbol} main"));
+        assert!(calls.contains(&format!("tab\trename\tw-partial:t-main\t{main_label}")));
         let renames = calls
             .iter()
             .filter(|call| call.starts_with("workspace\trename"))
@@ -2486,10 +2487,10 @@ fn rejects_multiple_matching_herdr_workspaces_before_mutation() {
 
 #[test]
 fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
-    for (symbol, label, renamed) in [
-        (None, "custom name", false),
-        (Some("🌲"), "🌲 topic", false),
-        (Some("🧑🏽‍💻"), "🌲 topic", true),
+    for (symbol, label, main_label, renamed) in [
+        (None, "custom name", "main", false),
+        (Some("🌲"), "🌲 topic", "🌲 main", false),
+        (Some("🧑🏽‍💻"), "🌲 topic", "🌲 main", true),
     ] {
         let fixture = WorkspaceFixture::new();
         assert_success(&forest(
@@ -2519,7 +2520,7 @@ fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
         let tabs = serde_json::json!({
             "result": {
                 "tabs": [
-                    {"tab_id": "w-existing:t-main", "label": "main", "pane_count": 1},
+                    {"tab_id": "w-existing:t-main", "label": main_label, "pane_count": 1},
                     {"tab_id": "w-existing:t-alpha", "label": "alpha", "pane_count": 1},
                     {"tab_id": "w-existing:t-beta", "label": "beta", "pane_count": 1}
                 ]
@@ -2551,20 +2552,31 @@ fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
             if renamed { "reconciled" } else { "reused" }
         );
         assert_eq!(report["herdr_workspace_id"], "w-existing");
-        assert!(
-            report["tabs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|tab| tab["status"] == "reused")
+        assert_eq!(
+            report["tabs"][0]["status"],
+            if renamed { "reconciled" } else { "reused" }
         );
         let calls = herdr.calls();
         assert!(!calls.iter().any(|call| {
             call.starts_with("workspace\tcreate")
                 || call.starts_with("tab\tcreate")
-                || call.starts_with("tab\trename")
                 || call.starts_with("pane\treport-metadata")
         }));
+        let tab_renames = calls
+            .iter()
+            .filter(|call| call.starts_with("tab\trename"))
+            .collect::<Vec<_>>();
+        if renamed {
+            assert_eq!(
+                tab_renames,
+                [&format!(
+                    "tab\trename\tw-existing:t-main\t{} main",
+                    symbol.unwrap()
+                )]
+            );
+        } else {
+            assert!(tab_renames.is_empty());
+        }
         let renames = calls
             .iter()
             .filter(|call| call.starts_with("workspace\trename"))
@@ -2652,7 +2664,7 @@ fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
             );
         } else {
             assert_eq!(report["herdr_workspace_id"], "w-new");
-            assert_eq!(report["tabs"][0]["label"], "main");
+            assert_eq!(report["tabs"][0]["label"], "🌲 main");
             assert!(calls.contains(&format!(
                 "workspace\tcreate\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
                 topic.display()
@@ -2968,7 +2980,7 @@ fn attaches_a_standalone_workspace_as_a_rex_session() {
             "rex_session_id": "s-new",
             "status": "created",
             "tabs": [{
-                "label": "main",
+                "label": "🌲 main",
                 "path": path(&topic),
                 "rex_window_id": "s-new:w-main",
                 "status": "created"
@@ -2982,7 +2994,7 @@ fn attaches_a_standalone_workspace_as_a_rex_session() {
         [
             "ls\t--json".to_owned(),
             format!(
-                "new\t🌲 topic\t--window\tmain\t--cwd\t{}\t--json\t--\t/bin/fish\t--login",
+                "new\t🌲 topic\t--window\t🌲 main\t--cwd\t{}\t--json\t--\t/bin/fish\t--login",
                 topic.display()
             ),
             "window\tfocus\t--session\ts-new\ts-new:w-main".to_owned(),
@@ -3065,7 +3077,7 @@ fn renames_a_rex_session_whose_workspace_gained_a_symbol() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "reconciled");
     assert_eq!(report["tabs"][0]["status"], "created");
-    assert_eq!(report["tabs"][0]["rex_window_id"], "s-topic:w-main");
+    assert_eq!(report["tabs"][0]["rex_window_id"], "s-topic:w-🌲 main");
     let calls = rex.calls();
     assert_eq!(
         calls
@@ -3074,11 +3086,42 @@ fn renames_a_rex_session_whose_workspace_gained_a_symbol() {
             .collect::<Vec<_>>(),
         [
             &format!(
-                "window\tnew\t--session\ts-topic\tmain\t--cwd\t{}\t--focus=false\t--json",
+                "window\tnew\t--session\ts-topic\t🌲 main\t--cwd\t{}\t--focus=false\t--json",
                 fixture.workspace("topic").display()
             ),
             "session\trename\ts-topic\t🌲 topic"
         ]
+    );
+}
+
+#[test]
+fn renames_a_rex_main_tab_whose_workspace_gained_a_symbol() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(
+        &fixture.root,
+        &["create", "topic", "--symbol", "🌲"],
+    ));
+    let rex = FakeRex::new(&fixture.root);
+    rex.sessions(serde_json::json!([{"session_id": "s-topic", "label": "🌲 topic"}]));
+    rex.windows("s-topic", &[("s-topic:w-main", "main", "b-main")]);
+
+    let output = rex
+        .command(&fixture.root)
+        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "reconciled");
+    assert_eq!(report["tabs"][0]["label"], "🌲 main");
+    assert_eq!(report["tabs"][0]["status"], "reconciled");
+    assert_eq!(
+        rex.calls()
+            .iter()
+            .filter(|call| is_rex_mutation(call))
+            .collect::<Vec<_>>(),
+        ["window\trename\t--session\ts-topic\ts-topic:w-main\t🌲 main"]
     );
 }
 

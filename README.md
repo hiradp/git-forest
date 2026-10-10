@@ -503,14 +503,15 @@ rule always applies.
 
 ```text
 Herdr: 🗺 q4-storage
-  main
+  🗺 main
   🌲 logical-slots
   slot-tests
 ```
 
 A child tab is labeled with the workspace's symbol if it has one and its name,
 such as `🌲 logical-slots`. A workspace opened as its own Herdr
-workspace is named with its symbol and a space before its name. Without a
+workspace is named with its symbol and a space before its name, and its `main`
+tab carries the same symbol, such as `🗺 main`. Without a
 symbol, new Herdr workspaces use the plain workspace name and existing Herdr
 names are left alone. Each attachment renames a managed tab whose label has
 drifted.
@@ -573,8 +574,8 @@ cannot move a tab between sessions either.
 Rex has no runtime metadata, so Forest identifies what is open by label alone:
 
 - A session whose label is the workspace's name, with or without a symbol, is
-  that workspace opened on its own. Its tab labeled `main` is the managed tab,
-  and Forest adds one if none has that label.
+  that workspace opened on its own. Its tab labeled `main`, with or without a
+  symbol, is the managed tab, and Forest adds one if none has that label.
 - A tab with such a label in any other session is that workspace opened as a
   child tab.
 - When more than one session or tab matches, Forest keeps those with a pane
@@ -585,8 +586,8 @@ This costs more than Herdr's tags do. Renaming a managed session or tab in Rex
 makes the next `attach` open a second copy. A session or tab that merely shares
 a workspace's name is treated as that workspace. Workspaces with the same name
 under different workspace roots are told apart only by working directory.
-A saved symbol is reconciled as it is in Herdr: Forest renames the session, and
-a child tab whose label has drifted.
+A saved symbol is reconciled as it is in Herdr: Forest renames the session, its
+`main` tab, and a child tab whose label has drifted.
 
 New terminals run your login shell unless `attach.rex_command` names another
 program. After attaching, Forest focuses the tab and asks the Rex app to show
