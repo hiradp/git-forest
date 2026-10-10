@@ -13,7 +13,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use crate::config::{self, CheckoutId, Config};
 use crate::error::{AppError, Result};
 use crate::git::Git;
-use crate::workspace::{self, WorkspaceState};
+use crate::workspace::{self, Ancestry, WorkspaceState};
 
 const PAGE_SIZE: usize = 10;
 
@@ -52,6 +52,9 @@ enum WorkspaceChoice {
         name_width: usize,
         summary: String,
         issue: Option<String>,
+        /// Workspaces nested under this one. The picker hides them because
+        /// opening this workspace opens them too.
+        descendants: Vec<String>,
     },
 }
 
@@ -60,6 +63,17 @@ impl WorkspaceChoice {
         match self {
             Self::Create => "Create a new workspace",
             Self::Existing { name, .. } => name,
+        }
+    }
+
+    /// Hidden descendants stay searchable through the workspace that shows
+    /// them.
+    fn search_text(&self) -> String {
+        match self {
+            Self::Create => self.to_string(),
+            Self::Existing { descendants, .. } => {
+                format!("{self} {}", descendants.join(" "))
+            }
         }
     }
 }
@@ -73,8 +87,14 @@ impl fmt::Display for WorkspaceChoice {
                 name_width,
                 summary,
                 issue,
+                descendants,
             } => {
                 write!(formatter, "{name:<name_width$}  {summary}")?;
+                match descendants.len() {
+                    0 => {}
+                    1 => formatter.write_str("  +1 child")?,
+                    count => write!(formatter, "  +{count} children")?,
+                }
                 if issue.is_some() {
                     formatter.write_str("  ! needs attention")?;
                 }
@@ -102,18 +122,8 @@ pub fn prompt(config: &Config, git: &Git) -> Result<Outcome> {
         .iter()
         .map(|state| state.name.clone())
         .collect::<HashSet<_>>();
-    let name_width = states
-        .iter()
-        .map(|state| state.name.chars().count())
-        .max()
-        .unwrap_or(0);
-    let mut choices = Vec::with_capacity(states.len() + 1);
-    choices.push(WorkspaceChoice::Create);
-    choices.extend(
-        states
-            .iter()
-            .map(|state| workspace_choice(state, name_width)),
-    );
+    let mut choices = vec![WorkspaceChoice::Create];
+    choices.extend(workspace_choices(&states));
 
     let mut terminal = PromptTerminal::new().map_err(AppError::Prompt)?;
     let mut selected_workspaces = HashSet::new();
@@ -125,6 +135,7 @@ pub fn prompt(config: &Config, git: &Git) -> Result<Outcome> {
             &mut selected_workspaces,
             "search · ↑↓ move · space select · enter open · ctrl+d/del actions · esc leave",
             |choice| choice.answer(),
+            WorkspaceChoice::search_text,
         )? {
             PromptAnswer::Value(SelectionAction::Open(index)) => {
                 return match choices[index].clone() {
@@ -141,10 +152,7 @@ pub fn prompt(config: &Config, git: &Git) -> Result<Outcome> {
             }
             PromptAnswer::Value(SelectionAction::Manage(indices)) => indices
                 .into_iter()
-                .filter_map(|index| match &choices[index] {
-                    WorkspaceChoice::Existing { name, .. } => Some(name.clone()),
-                    WorkspaceChoice::Create => None,
-                })
+                .flat_map(|index| retirement_names(&choices[index]))
                 .collect::<Vec<_>>(),
             PromptAnswer::Cancelled => return Ok(Outcome::Cancelled),
             PromptAnswer::Interrupted => return Ok(Outcome::Interrupted),
@@ -208,7 +216,62 @@ fn prompt_for_workspace(
     }))
 }
 
-fn workspace_choice(state: &WorkspaceState, name_width: usize) -> WorkspaceChoice {
+/// Retiring a workspace from the picker retires the descendants it hides.
+fn retirement_names(choice: &WorkspaceChoice) -> Vec<String> {
+    match choice {
+        WorkspaceChoice::Create => Vec::new(),
+        WorkspaceChoice::Existing {
+            name, descendants, ..
+        } => std::iter::once(name).chain(descendants).cloned().collect(),
+    }
+}
+
+/// One choice per workspace that is not nested under another active
+/// workspace. A missing or cyclic parent leaves a workspace at the top level.
+fn workspace_choices(states: &[WorkspaceState]) -> Vec<WorkspaceChoice> {
+    let roots = states
+        .iter()
+        .map(|state| {
+            if !state.exists {
+                return state.name.as_str();
+            }
+            match workspace::ancestry(states, &state.name) {
+                Ancestry::Linked(ancestors) | Ancestry::MissingParent { ancestors, .. } => {
+                    ancestors.last().map_or(&state.name, |root| &root.name)
+                }
+                Ancestry::Cycle(_) => &state.name,
+            }
+        })
+        .collect::<Vec<_>>();
+    let name_width = states
+        .iter()
+        .zip(&roots)
+        .filter(|(state, root)| state.name == **root)
+        .map(|(state, _)| state.name.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    states
+        .iter()
+        .zip(&roots)
+        .filter(|(state, root)| state.name == **root)
+        .map(|(state, _)| {
+            let descendants = states
+                .iter()
+                .zip(&roots)
+                .filter(|(other, root)| **root == state.name && other.name != state.name)
+                .map(|(other, _)| other)
+                .collect::<Vec<_>>();
+            workspace_choice(state, &descendants, name_width)
+        })
+        .collect()
+}
+
+fn workspace_choice(
+    state: &WorkspaceState,
+    descendants: &[&WorkspaceState],
+    name_width: usize,
+) -> WorkspaceChoice {
     let repositories = state
         .members
         .iter()
@@ -221,29 +284,41 @@ fn workspace_choice(state: &WorkspaceState, name_width: usize) -> WorkspaceChoic
         repositories.join(" · ")
     };
 
-    let issue = if !state.exists {
-        Some(
-            state
-                .inconsistencies
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "workspace directory is missing".to_owned()),
-        )
-    } else {
-        state.members.iter().find_map(|member| {
-            member
-                .inconsistencies
-                .first()
-                .map(|issue| format!("{}: {issue}", member.id))
+    // Opening a workspace opens its descendants, so their issues block it too.
+    let issue = workspace_issue(state).or_else(|| {
+        descendants.iter().find_map(|descendant| {
+            workspace_issue(descendant).map(|issue| format!("{}: {issue}", descendant.name))
         })
-    };
+    });
 
     WorkspaceChoice::Existing {
         name: state.name.clone(),
         name_width,
         summary,
         issue,
+        descendants: descendants
+            .iter()
+            .map(|descendant| descendant.name.clone())
+            .collect(),
     }
+}
+
+fn workspace_issue(state: &WorkspaceState) -> Option<String> {
+    if !state.exists {
+        return Some(
+            state
+                .inconsistencies
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "workspace directory is missing".to_owned()),
+        );
+    }
+    state.members.iter().find_map(|member| {
+        member
+            .inconsistencies
+            .first()
+            .map(|issue| format!("{}: {issue}", member.id))
+    })
 }
 
 fn input_error_message(error: &AppError) -> String {
@@ -266,23 +341,25 @@ enum SelectionAction {
     Manage(Vec<usize>),
 }
 
-fn select<T, F>(
+fn select<T, F, S>(
     terminal: &mut PromptTerminal,
     message: &str,
     choices: &[T],
     checked: &mut HashSet<usize>,
     help: &str,
     answer: F,
+    search_text: S,
 ) -> Result<PromptAnswer<SelectionAction>>
 where
     T: fmt::Display,
     F: for<'a> Fn(&'a T) -> &'a str,
+    S: Fn(&T) -> String,
 {
     let mut query = String::new();
     let mut selection = 0;
 
     loop {
-        let filtered = filtered_indices(choices, &query);
+        let filtered = filtered_indices(choices, &query, &search_text);
         if selection >= filtered.len() {
             selection = filtered.len().saturating_sub(1);
         }
@@ -658,7 +735,7 @@ fn multi_select(
     let mut error = None;
 
     loop {
-        let filtered = filtered_indices(choices, &query);
+        let filtered = filtered_indices(choices, &query, ToString::to_string);
         if selection >= filtered.len() {
             selection = filtered.len().saturating_sub(1);
         }
@@ -880,7 +957,11 @@ fn multi_select_lines(
     lines
 }
 
-fn filtered_indices<T: fmt::Display>(choices: &[T], query: &str) -> Vec<usize> {
+fn filtered_indices<T>(
+    choices: &[T],
+    query: &str,
+    search_text: impl Fn(&T) -> String,
+) -> Vec<usize> {
     if query.is_empty() {
         return (0..choices.len()).collect();
     }
@@ -891,7 +972,7 @@ fn filtered_indices<T: fmt::Display>(choices: &[T], query: &str) -> Vec<usize> {
         .enumerate()
         .filter_map(|(index, choice)| {
             matcher
-                .fuzzy_match(&choice.to_string(), query)
+                .fuzzy_match(&search_text(choice), query)
                 .map(|score| (index, score))
         })
         .collect::<Vec<_>>();
@@ -1131,16 +1212,106 @@ mod tests {
             name_width: 8,
             summary: "api · web".to_owned(),
             issue: None,
+            descendants: Vec::new(),
         };
         let unhealthy = WorkspaceChoice::Existing {
             name: "broken".to_owned(),
             name_width: 8,
             summary: "api".to_owned(),
             issue: Some("api is missing".to_owned()),
+            descendants: Vec::new(),
         };
 
         assert_eq!(healthy.to_string(), "short     api · web");
         assert_eq!(unhealthy.to_string(), "broken    api  ! needs attention");
+    }
+
+    fn workspace(name: &str, parent: Option<&str>, exists: bool) -> WorkspaceState {
+        WorkspaceState {
+            name: name.to_owned(),
+            path: std::path::PathBuf::from(name),
+            exists,
+            metadata: workspace::WorkspaceMetadata {
+                symbol: None,
+                parent: parent.map(str::to_owned),
+            },
+            members: Vec::new(),
+            workspace_entries: Vec::new(),
+            inconsistencies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn picker_lists_only_top_level_workspaces() {
+        let choices = workspace_choices(&[
+            workspace("billing", None, true),
+            workspace("billing-db", Some("billing-ui"), true),
+            workspace("billing-ui", Some("billing"), true),
+            workspace("looped", Some("looped-too"), true),
+            workspace("looped-too", Some("looped"), true),
+            workspace("orphan", Some("retired"), true),
+            workspace("search", None, true),
+        ]);
+
+        assert_eq!(
+            choices.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "billing     workspace root only  +2 children",
+                "looped      workspace root only",
+                "looped-too  workspace root only",
+                "orphan      workspace root only",
+                "search      workspace root only",
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_descendants_are_searchable_and_retired_with_their_root() {
+        let choices = workspace_choices(&[
+            workspace("billing", None, true),
+            workspace("checkout-flow", Some("billing"), true),
+            workspace("search", None, true),
+        ]);
+
+        assert_eq!(
+            filtered_indices(&choices, "checkout", WorkspaceChoice::search_text),
+            [0]
+        );
+        assert_eq!(retirement_names(&choices[0]), ["billing", "checkout-flow"]);
+        assert_eq!(retirement_names(&choices[1]), ["search"]);
+    }
+
+    #[test]
+    fn a_broken_descendant_marks_its_root() {
+        let mut broken = workspace("billing-ui", Some("billing"), true);
+        broken.members.push(workspace::MemberState {
+            id: CheckoutId::primary("web"),
+            canonical_path: std::path::PathBuf::from("web"),
+            path: std::path::PathBuf::from("billing-ui/web"),
+            exists: true,
+            registered: true,
+            metadata: None,
+            unexpected_worktree_paths: Vec::new(),
+            inconsistencies: vec!["branch is checked out elsewhere".to_owned()],
+        });
+        let choices = workspace_choices(&[
+            workspace("billing", None, true),
+            broken,
+            workspace("gone", Some("billing"), false),
+        ]);
+
+        // A missing workspace is not an active child, so it keeps its own row.
+        assert_eq!(choices.len(), 2);
+        assert!(matches!(
+            &choices[0],
+            WorkspaceChoice::Existing { issue: Some(issue), descendants, .. }
+                if issue == "billing-ui: web: branch is checked out elsewhere"
+                    && descendants == &["billing-ui"]
+        ));
+        assert!(matches!(
+            &choices[1],
+            WorkspaceChoice::Existing { name, .. } if name == "gone"
+        ));
     }
 
     #[test]

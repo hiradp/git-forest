@@ -198,10 +198,16 @@ enter to attach the selected workspace in Herdr or Rex.
 
 ◆ Where do you want to work?
 ›   +  Create a new workspace
-  ○ logical-slots  api · operator
+  ○ logical-slots  api · operator  +2 children
   ● review-123     api
 [search · ↑↓ move · space select · enter open · ctrl+d/del actions · esc leave]
 ```
+
+The picker lists only workspaces that are not nested under another active
+workspace, with a count of the workspaces nested beneath each. Opening one opens
+its descendants too, and searching for a descendant's name finds the workspace
+that contains it. A workspace whose saved parent is missing or cyclic is listed
+on its own.
 
 The first picker also offers **Create a new workspace**. Forest prompts for a
 valid name and presents the configured repositories as a searchable
@@ -214,8 +220,9 @@ base overrides.
 
 Press Space to select any number of existing workspaces, then Ctrl+D or Delete
 to choose Archive, Force archive, Delete, or Force delete for the selection. If
-nothing is selected, the action applies only to the highlighted workspace. A
-single confirmation covers the full selection. Archive moves workspace-local
+nothing is selected, the action applies only to the highlighted workspace. The
+action also covers every workspace nested under the ones chosen, and a single
+confirmation names the full set. Archive moves workspace-local
 files beneath `.archive`; Delete permanently removes them.
 Non-force actions refuse dirty worktrees, while force actions explicitly discard
 dirty worktree changes. All four actions preserve Git branches. Press escape at
@@ -643,9 +650,9 @@ by actual instant and numeric suffix, with `legacy` first.
 
 Dirty worktrees, unregistered checkout paths, layout mismatches, a missing
 workspace directory, or active child workspaces prevent archival. Archive or
-delete the children first, or point them at another parent. When the interactive
-launcher retires several selected workspaces, it retires children before their
-parents. Passing `--force` removes dirty worktrees
+delete the children first, or point them at another parent. The interactive
+launcher retires a workspace together with the workspaces nested under it,
+children before their parents. Passing `--force` removes dirty worktrees
 anyway, discarding their modified, untracked, and ignored files; all other
 conflicts still prevent archival. Workspace-local entries do not. A Git failure
 can leave a partially removed active workspace, and repeating the command safely
