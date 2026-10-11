@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 #[cfg(any(target_os = "android", target_os = "linux", target_vendor = "apple"))]
 use std::fs::File;
+use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use crate::config::{CheckoutId, Config, RepositoryConfig};
 use crate::error::{AppError, Result};
@@ -317,38 +320,75 @@ pub fn scan(config: &Config, git: &Git) -> Result<Vec<WorkspaceState>> {
 }
 
 fn load_registries<'a>(config: &'a Config, git: &Git) -> Result<Vec<RepositoryRegistry<'a>>> {
-    config
-        .repositories
-        .iter()
-        .map(|repository| {
-            if !repository.path.exists() {
-                return Ok(RepositoryRegistry {
-                    repository,
-                    worktrees: Vec::new(),
-                    issue: Some(format!(
-                        "canonical repository {} does not exist",
-                        repository.path.display()
-                    )),
-                });
-            }
-            let inspection = git.inspect_repository(&repository.path)?;
-            if !inspection.is_git_worktree {
-                return Ok(RepositoryRegistry {
-                    repository,
-                    worktrees: Vec::new(),
-                    issue: Some(format!(
-                        "canonical repository {} is not a Git worktree",
-                        repository.path.display()
-                    )),
-                });
-            }
-            Ok(RepositoryRegistry {
-                repository,
-                worktrees: git.worktrees(&repository.path)?,
-                issue: None,
+    // Each repository costs Git processes, and starting them dominates a scan,
+    // so they are loaded side by side. Results keep configuration order.
+    let repositories = &config.repositories;
+    let workers = thread::available_parallelism()
+        .map_or(1, NonZeroUsize::get)
+        .min(repositories.len());
+    let next = AtomicUsize::new(0);
+    let mut loaded = thread::scope(|scope| {
+        let workers = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut loaded = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(repository) = repositories.get(index) else {
+                            break loaded;
+                        };
+                        loaded.push((index, load_registry(repository, git)));
+                    }
+                })
             })
-        })
-        .collect()
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().expect("loading a repository does not panic"))
+            .collect::<Vec<_>>()
+    });
+    loaded.sort_by_key(|(index, _)| *index);
+    loaded.into_iter().map(|(_, registry)| registry).collect()
+}
+
+fn load_registry<'a>(
+    repository: &'a RepositoryConfig,
+    git: &Git,
+) -> Result<RepositoryRegistry<'a>> {
+    if !repository.path.exists() {
+        return Ok(RepositoryRegistry {
+            repository,
+            worktrees: Vec::new(),
+            issue: Some(format!(
+                "canonical repository {} does not exist",
+                repository.path.display()
+            )),
+        });
+    }
+    // A worktree root lists itself, which spares asking Git whether it is
+    // one. Anything else is settled by asking.
+    let listed = git.worktrees(&repository.path);
+    let is_root = match &listed {
+        Ok(worktrees) => worktrees
+            .iter()
+            .any(|worktree| paths_match(&worktree.path, &repository.path)),
+        Err(_) => false,
+    };
+    if !is_root && !git.is_worktree_root(&repository.path)? {
+        return Ok(RepositoryRegistry {
+            repository,
+            worktrees: Vec::new(),
+            issue: Some(format!(
+                "canonical repository {} is not a Git worktree",
+                repository.path.display()
+            )),
+        });
+    }
+    Ok(RepositoryRegistry {
+        repository,
+        worktrees: listed?,
+        issue: None,
+    })
 }
 
 fn build_workspace(

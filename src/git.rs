@@ -603,16 +603,19 @@ impl Git {
     }
 
     pub fn is_worktree_root(&self, path: &Path) -> Result<bool> {
-        let inside = self.run(path, ["rev-parse", "--is-inside-work-tree"])?;
-        if !inside.status.success() || text(&inside.stdout) != "true" {
+        // One process answers both; outside a work tree the second fails.
+        let output = self.run(
+            path,
+            ["rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+        )?;
+        if !output.status.success() {
             return Ok(false);
         }
-        let top_level = self.run(path, ["rev-parse", "--show-toplevel"])?;
-        if !top_level.status.success() {
+        let stdout = text(&output.stdout);
+        let Some(("true", top_level)) = stdout.split_once('\n') else {
             return Ok(false);
-        }
-        let top_level = PathBuf::from(text(&top_level.stdout));
-        Ok(paths_match(&top_level, path))
+        };
+        Ok(paths_match(Path::new(top_level), path))
     }
 
     fn git_common_dir(&self, path: &Path) -> Result<Option<PathBuf>> {
