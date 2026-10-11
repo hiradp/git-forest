@@ -23,7 +23,7 @@ configured canonical repositories.
   never be the default or implied.
 - Keep human output on stdout, diagnostics on stderr, and JSON streams free of
   non-JSON text.
-- Keep command report field names stable. Update README examples and integration
+- Keep command report field names stable. Update `docs/json.md` and integration
   tests when intentionally changing the JSON contract.
 
 ## Structure

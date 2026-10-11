@@ -1,4 +1,4 @@
-.TH "GIT-FOREST" "1" "2026-08-10" "git-forest" "Git Manual"
+.TH "GIT-FOREST" "1" "2026-10-11" "git-forest" "Git Manual"
 .SH NAME
 git-forest \- manage named workspaces across multiple Git repositories
 .SH SYNOPSIS
@@ -26,8 +26,8 @@ Without an interactive terminal, invoking Forest without a command prints its
 command-line help.
 .PP
 Forest treats Git worktree metadata and the filesystem as authoritative.
-It does not maintain a separate registry, reset or delete branches, or perform
-implicit network operations.
+It does not maintain a separate registry, reset or delete branches, start
+runtime services, or perform implicit network operations.
 Only
 .BR setup ,
 .BR fetch ,
@@ -55,107 +55,252 @@ This option is global and may be used with any command.
 .B \-\-json
 Emit structured JSON.
 This option is available on non-interactive commands.
+Application errors are then emitted as JSON on standard error.
+The report formats are documented in
+.B docs/json.md
+in the git-forest repository.
+.PP
+Human output is colored only when standard output is a terminal.
 .SH COMMANDS
 .TP
 .B open
 Search, create, and open workspaces interactively.
-Press Space to select one or more existing workspaces, then Ctrl-D or Delete to
-choose Archive, Force archive, Delete, or Force delete for the selection.
+Type to fuzzy-search workspaces, then press Enter to attach the selected
+workspace in Herdr or Rex.
+Press Escape at any prompt to go back or leave without making changes.
+.IP
+The picker lists only workspaces that are not nested under another active
+workspace, with a count of the workspaces nested beneath each.
+Opening one opens its descendants too, and searching for a descendant's name
+finds the workspace that contains it.
+A workspace whose saved parent is missing or cyclic is listed on its own.
+.IP
+The picker also offers to create a workspace.
+Forest prompts for a name and presents the configured repositories as a
+searchable multi-select.
+After a successful preflight it creates the linked worktrees and attaches the
+new workspace.
+The launcher creates one primary checkout per selected repository using the
+configured branch template and each repository's local
+.BR origin/HEAD ;
+use
+.B create
+and
+.B add
+for named checkouts or branch and base overrides.
+.IP
+Press Space to select one or more workspaces, then Ctrl-D or Delete to choose
+Archive, Force archive, Delete, or Force delete for the selection.
 With no selection, the action applies to the highlighted workspace.
-A single confirmation covers the full selection.
+The action also covers every workspace nested under the ones chosen, children
+before their parents, and a single confirmation names the full set.
 Archive preserves workspace-local files beneath
 .BR .archive ;
 Delete permanently removes them.
-Non-force actions refuse dirty worktrees, force actions explicitly discard dirty
-worktree changes, and every action preserves Git branches.
+Non-force actions refuse dirty worktrees, force actions discard dirty worktree
+changes, and every action preserves Git branches.
 .TP
 .B setup
 Ensure configured canonical repositories are cloned.
 Existing Git worktrees are reused without fetching or changing their remotes.
+Missing repositories are cloned from the rendered
+.B repositories.remote
+template in configuration order.
+.IP
+Before cloning, Forest checks every configured destination.
+An existing path that is not a Git worktree, or a missing repository without a
+configured remote, prevents all cloning.
+If a clone fails after earlier repositories succeeded, the successful clones
+are preserved and later repositories are not run; repeating the command reuses
+completed clones and resumes the rest.
+Clones are completed in adjacent staging directories before being moved into
+place, so an interrupted clone is never reused as a completed repository.
+Forest never overwrites an existing path.
 .TP
 .B repos
-List configured repositories, their origin URLs, and their locally known
-default refs.
+List configured repositories in configuration order, with their origin URLs
+and locally known default refs.
+Missing canonical clones are reported rather than failing the command.
+The default ref is read only from the symbolic ref
+.BR refs/remotes/origin/HEAD .
+Forest never guesses
+.B main
+or
+.B master
+and never contacts a remote to repair a missing default.
 .TP
-.BI fetch " [repository ...]"
+.BI fetch " [repository ...] [\-\-jobs N]"
 Fetch
 .B origin
 for all configured repositories or for the named subset.
-Use
+Fetches run concurrently, at most 16 at a time unless
 .BI \-\-jobs " N"
-to limit concurrent fetches.
+sets another bound.
+The report stays in configuration order.
+Every selected repository is attempted, and the command exits unsuccessfully if
+any fetch fails.
+Tags are not fetched because workspace operations use only remote-tracking
+branch refs.
+.IP
+Fetching updates remote-tracking refs, including the
+.B origin/HEAD
+target used as the default creation base, but never merges, resets, or
+otherwise updates local branches or worktrees.
 .TP
-.BI update " [repository ...]"
+.BI update " [repository ...] [\-\-jobs N]"
 Fetch and fast-forward canonical default branches for all configured
 repositories or for the named subset.
-Updates are fast-forward only and never reset or force a branch.
-Use
-.BI \-\-jobs " N"
-to limit concurrent fetches.
+Fetches use the same bounded concurrency as
+.BR fetch ,
+but transfer only the branch identified by
+.BR refs/remotes/origin/HEAD .
+.IP
+If the branch is checked out, Forest updates its worktree with a
+fast-forward-only merge.
+If it is not, Forest moves the local ref only after verifying a fast-forward.
+Dirty checked-out branches, ignored paths that overlap incoming changes,
+missing local default branches, locally ahead branches, and diverged branches
+are reported as conflicts and are never reset or forced.
+A failure in one repository does not stop the others, but conflicts and
+failures make the command exit unsuccessfully.
 .TP
-.BI create " workspace [checkout ...]"
+.BI create " workspace [checkout ...] [\-\-symbol symbol] [\-\-parent workspace] [\-\-base checkout=ref ...] [\-\-branch checkout=branch ...]"
 Create a workspace, optionally with linked worktrees.
 When no checkouts are provided, create an empty workspace directory so
 worktrees can be added later with
-.BR add .
-A checkout is
-.B repository
-for its primary worktree or
-.B repository@slot
-for an additional worktree from the same repository.
-Use
-.BI \-\-base " checkout=ref"
-to override a creation base and
-.BI \-\-branch " checkout=branch"
-to select an existing local branch or create one from its remote-tracking ref.
-Use
-.BI \-\-symbol " symbol"
-to prefix the Herdr workspace or Rex session name with an emoji or symbol and a
-space, and
-.BI \-\-parent " workspace"
-to record an active workspace as this workspace's parent.
-Parents may nest to any depth; a parent that would form a cycle is rejected.
-Both values are stored in the optional workspace-local
-.B .forest-workspace.toml
-file as
-.B symbol
-and
-.BR parent ,
-which may be edited by hand and is preserved across rename, archive, and
-unarchive.
-Symbols must be nonempty and contain no whitespace or control characters;
-composed emoji are supported.
-Repeating creation with either option updates that value; omitting it preserves
-the saved value. Directory and branch names are unaffected.
-A legacy
-.B .forest-symbol
-file is still read and is replaced the next time Forest writes metadata.
-Creation preflights every requested checkout before mutation and is safe to
-repeat after partial execution.
+.BR add ;
+repeating empty creation is safe.
 Archived names remain available: creation starts a fresh active workspace and
 leaves saved files untouched, though existing branches may be reused.
 Use
 .B unarchive
 to restore saved workspace files.
-.TP
-.BI add " workspace checkout ..."
-Add primary or named linked worktrees to an existing workspace.
-It accepts the same
-.B \-\-base
+.IP
+A checkout is
+.B repository
+for its primary worktree or
+.B repository@slot
+for an additional worktree from the same repository.
+A primary checkout uses the repository name as its directory, such as
+.BR stacked/api ;
+a named checkout uses
+.BR stacked/api@part-2 .
+The default branch of a named checkout renders the slot as
+.BR {checkout} ,
+so with the template
+.B user/{checkout}
+the command
+.B create stacked api operator operator@part-2
+creates
+.B user/stacked
+at
+.B api
 and
-.B \-\-branch
-options as
+.BR operator ,
+and
+.B user/part-2
+at
+.BR operator@part-2 .
+Checkout identifiers must be unique within a request, and two checkouts from
+the same repository may not select the same branch.
+.IP
+Before mutation, every requested checkout is checked for:
+.RS
+.IP \(bu 2
+a present canonical Git worktree;
+.IP \(bu 2
+a valid rendered branch name;
+.IP \(bu 2
+a non-conflicting destination path;
+.IP \(bu 2
+existing worktree registration;
+.IP \(bu 2
+branches checked out elsewhere;
+.IP \(bu 2
+branch namespace conflicts;
+.IP \(bu 2
+a resolvable base when a new branch is needed.
+.RE
+.IP
+Preflight conflicts prevent all mutation.
+If Git fails after earlier checkouts have been created, successful worktrees
+are preserved and later checkouts are marked as not run; repeating the command
+resumes.
+.IP
+An existing worktree is reused only when its path, canonical repository, and
+branch all match.
+An existing branch that is not checked out elsewhere is added without being
+recreated.
+New branches start from
+.B origin/HEAD
+unless
+.BI \-\-base " checkout=ref"
+is given.
+.IP
+.BI \-\-branch " checkout=branch"
+selects a branch independently of the configured template.
+Forest first uses an existing local branch.
+If it is absent, Forest creates a local branch from
+.BI refs/remotes/origin/ branch
+and configures the remote branch as its upstream.
+The remote-tracking ref must already exist locally; creation never fetches.
+A branch override and a base override cannot both target the same checkout.
+After later fetches, Forest reports whether a tracking branch is behind but
+never merges, resets, or otherwise updates it.
+.IP
+.BI \-\-symbol " symbol"
+prefixes the Herdr workspace or Rex session name with an emoji or symbol and a
+space, and
+.BI \-\-parent " workspace"
+records an active workspace as this workspace's parent.
+Parents may nest to any depth; a parent that would form a cycle is rejected.
+Workspace directories stay side by side under the workspaces root; the link is
+metadata only.
+Both values are stored in the optional workspace-local
+.B .forest-workspace.toml
+file as
+.B symbol
+and
+.BR parent .
+The file is authoritative, is read on every command, may be edited by hand, and
+is preserved across rename, archive, and unarchive.
+When Forest writes it, other keys are kept but comments are not.
+An invalid file is reported with its path.
+The file appears in workspace entries like other workspace-local files.
+Symbols must be nonempty and contain no whitespace or control characters;
+composed emoji are supported.
+Repeating creation with either option updates that value; omitting it preserves
+the saved value.
+Directory names, branch names, and JSON workspace identifiers are unaffected.
+A legacy
+.B .forest-symbol
+file is still read, ignoring trailing whitespace, and is replaced the next time
+Forest writes metadata.
+.TP
+.BI add " workspace checkout ... [\-\-base checkout=ref ...] [\-\-branch checkout=branch ...]"
+Add primary or named linked worktrees to an existing workspace.
+At least one checkout is required.
+Checkouts are preflighted and created as for
 .BR create .
 .TP
 .B list [\-\-archived]
-List active workspaces by reconciling workspace directories with Git worktree
-metadata.
+List active workspaces by reconciling workspace directories with every
+canonical repository's Git worktree metadata.
 Human output is a tree of workspace names, each under its parent and prefixed
-with its symbol; JSON reports each
+with its saved symbol, or an evergreen tree emoji when it has none.
+JSON keeps a flat list and reports each
 .B parent
 and
 .BR symbol ,
-along with checkouts and inconsistencies.
+primary and named checkouts, unregistered paths, missing registered paths,
+workspace-local entries, and layout mismatches.
+Workspace-local entries are direct children of the workspace that are not
+configured checkout paths; they are supported and do not make the workspace
+inconsistent.
+Their JSON field is named
+.B unexpected_entries
+for compatibility.
+.IP
 With
 .BR \-\-archived ,
 list archives instead, with workspace name, human-readable date, archive ID,
@@ -175,15 +320,20 @@ fields rather than the active
 array.
 .TP
 .BI status " [workspace]"
-Show workspace and worktree status, including dirty state, upstream, and
-ahead/behind counts.
+Show what
+.B list
+reports in JSON, and for each checkout its current branch or detached state,
+HEAD commit, tracked and untracked dirty state, canonical worktree
+registration, upstream, and ahead and behind counts.
 .TP
 .BI path " workspace"
 Print the absolute path of an existing workspace.
+Human output is exactly the path followed by a newline.
 .TP
 .BI attach " workspace [\-\-multiplexer herdr|rex]"
 Open an existing workspace in a running Herdr or Rex session as a single tab
-rooted in the workspace directory.
+with one shell pane rooted in the workspace directory.
+Forest does not start commands in it.
 Forest uses the multiplexer named by
 .BR \-\-multiplexer ,
 then
@@ -193,55 +343,184 @@ in the configuration, then Rex when
 is set and
 .B HERDR_WORKSPACE_ID
 is not, and otherwise Herdr.
-If the workspace is already open, Forest focuses it.
+The launcher has no flag and uses the remaining rules.
+The following describes Herdr.
+.IP
+The
+.B herdr
+executable must be on
+.BR PATH ,
+and a Herdr server for the current session must already be running.
+Forest never starts or stops the server.
+Where the tab goes depends on where
+.B attach
+runs:
+.RS
+.IP 1. 3
+If the workspace is already open anywhere, as its own Herdr workspace or as a
+tab, Forest focuses it and never opens a second copy.
+.IP 2. 3
 Otherwise, if the Herdr workspace named by
 .B HERDR_WORKSPACE_ID
-has the workspace's parent open, Forest adds a tab there labeled with its
-position, the workspace's symbol if any, and its name.
-Otherwise, Forest creates a Herdr workspace whose only tab is
-.BR 1-main .
-A saved symbol prefixes the Herdr workspace name and is reconciled on each
-attachment. Without a symbol, existing Herdr workspace names are left alone.
-A missing parent produces a warning; cyclic parents are rejected.
-Every descendant also opens as a tab in the same Herdr workspace, depth-first in
-name order; descendants that are already open stay where they are.
-Every workspace in the tree is checked before Herdr is contacted, and rerunning
-after a failure opens only what is missing.
+has the workspace's parent open, either as that Herdr workspace or as one of
+its tabs, Forest adds a tab there.
+This applies from any tab in that Herdr workspace.
+A Herdr workspace that lost its Forest tokens still counts as the parent when
+its label names the parent and one of its panes is rooted in the parent's
+directory; Forest tags it again.
+.IP 3. 3
+Otherwise, including outside Herdr, Forest creates a Herdr workspace whose only
+tab is
+.BR main .
+.RE
 .IP
-In Rex, a session takes the place of a Herdr workspace, a window takes the
-place of a tab, and
+A child tab is labeled with the workspace's symbol, if it has one, and its
+name.
+A workspace opened as its own Herdr workspace is named the same way, and its
+.B main
+tab carries the same symbol.
+Without a symbol, new Herdr workspaces use the plain workspace name and
+existing Herdr names are left alone.
+Each attachment renames a managed tab whose label has drifted.
+.IP
+If a saved parent is not an active workspace, Forest prints a warning and
+ignores it; JSON reports carry it in
+.BR warnings .
+Parents that form a cycle are rejected before Forest contacts Herdr.
+.IP
+Attaching a workspace also opens all of its descendants as tabs in the same
+Herdr workspace, depth-first in name order.
+A descendant that is already open stays where it is, even in another Herdr
+workspace, because Herdr cannot move tabs between workspaces.
+Only the named workspace is focused.
+Forest checks every workspace in the tree before contacting Herdr, so a
+descendant with invalid metadata or inconsistent worktrees blocks attaching its
+ancestors until it is fixed.
+Rerunning after a Herdr failure opens only what is missing.
+.IP
+Forest records a fixed-length identifier derived from the canonical workspace
+path in Herdr's runtime metadata: on the Herdr workspace for a workspace opened
+on its own, and on the tab's pane for a child tab.
+Herdr truncates metadata values to 80 bytes, so Forest does not store the path
+itself.
+Herdr workspaces tagged with the full path by earlier versions are still
+recognized when the path fit, and Forest adds the identifier the first time it
+sees one.
+Tabs and panes Forest did not create keep their positions.
+Herdr workspaces created by earlier versions with one tab per checkout are
+reused; their checkout tabs are left open and are no longer managed.
+Multiple matches are rejected rather than guessed.
+.IP
+Attachment does not create worktrees or otherwise change Git state.
+A workspace with inconsistent configured worktrees or invalid metadata is
+rejected.
+Removing a Forest workspace does not close its Herdr workspace, tabs, or
+processes.
+.IP
+Human output summarizes the attached tab:
+.IP
+.EX
+Workspace  logical-slots
+Path       /project/src/.workspaces/logical-slots
+Parent     q4-storage
+Herdr      w1
+
+  ✓ 🌲 logical-slots  created  /project/src/.workspaces/logical-slots
+.EE
+.IP
+In Rex, a session takes the place of a Herdr workspace, a window, which Rex
+shows as a tab, takes the place of a tab, and
 .B REX_SESSION
 names the session
 .B attach
 runs in.
-Rex has no runtime metadata, so Forest recognizes an open workspace by its
-session or tab label, and settles duplicate labels by which one has a pane
-working inside the workspace directory; anything still ambiguous is rejected.
-A session or tab renamed in Rex is no longer recognized.
-Forest never starts the Rex server.
-If Rex cannot switch an app to the session, the workspace stays open and Forest
-prints a warning.
+The same placement rules apply, and Rex cannot move a tab between sessions
+either.
+The
+.B rex
+executable must be on
+.B PATH
+and a Rex server must already be running.
+Forest passes
+.B \-\-autostart=false
+to every Rex command, so it never starts the server, and it never stops it.
+.IP
+Rex has no runtime metadata, so Forest identifies what is open by label alone:
+.RS
+.IP \(bu 2
+A session whose label is the workspace's name, with or without a symbol, is
+that workspace opened on its own.
+Its tab labeled
+.BR main ,
+with or without a symbol, is the managed tab, and Forest adds one if none has
+that label.
+.IP \(bu 2
+A tab with such a label in any other session is that workspace opened as a
+child tab.
+.IP \(bu 2
+When more than one session or tab matches, Forest keeps those with a pane whose
+foreground process is working inside the workspace directory.
+Anything other than exactly one is rejected.
+.RE
+.IP
+Renaming a managed session or tab in Rex therefore makes the next
+.B attach
+open a second copy.
+A session or tab that merely shares a workspace's name is treated as that
+workspace, and workspaces with the same name under different workspace roots
+are told apart only by working directory.
+A saved symbol is reconciled as in Herdr: Forest renames the session, its
+.B main
+tab, and a child tab whose label has drifted.
+.IP
+New Rex terminals run the login shell unless
+.B attach.rex_command
+names another program.
+After attaching, Forest focuses the tab and asks the Rex app to show the
+session.
+Rex can do that only when exactly one app is connected; otherwise the
+workspace stays open in the background and Forest reports a warning.
 .TP
 .BI rename " workspace new-workspace"
-Rename an active workspace without changing its branches or working tree
-contents.
+Rename an active workspace without changing its branches, commits, upstreams,
+or working tree contents.
 Forest preflights the complete workspace, atomically moves its directory, and
 uses
 .B git worktree repair
 to update worktree metadata in each canonical repository.
-Dirty files and workspace-local entries are preserved.
+Dirty, untracked, and ignored files and workspace-local entries are preserved.
 An inconsistent source or active destination prevents the rename.
 Archives do not reserve names and remain untouched.
-If Git repair fails after the directory moves, repeating the same command
-resumes the incomplete repair.
+Rename never fetches and has no
+.B \-\-force
+option.
+.IP
+Existing branch names remain unchanged.
+If the branch template uses
+.BR {workspace} ,
+a checkout created after the rename uses the new workspace name while existing
+checkouts keep branches rendered with the old name.
+Forest cannot tell which branches came from the template rather than an
+explicit
+.B \-\-branch
+override.
+.IP
+A Git repair failure can leave the directory at the new path with
+registrations still pointing to the old path; repeating the same command
+recognizes that state and resumes the repair.
 Before moving anything, rename updates
 .B parent
 in each active child, restoring it if the directory move fails.
-Forest does not update Herdr runtime metadata or Rex labels.
+A resumed rename updates any children that still name the old workspace.
+Forest does not update Herdr runtime metadata or Rex labels, so a later
+.B attach
+under the new name may create a new Herdr workspace or Rex session.
 .TP
 .BI archive " workspace [\-\-force]"
-Remove every clean registered worktree in a workspace, preserve its branches,
-and move its workspace-local entries to a new generation beneath
+Remove every clean registered worktree in a workspace with
+.BR "git worktree remove" ,
+preserve its branches, and, once every removal succeeds, atomically move its
+workspace-local entries to a new generation beneath
 .BR workspaces.root/.archive/.generations .
 For example:
 .BR .archive/.generations/nkdb-azure\-\-2026-09-26-09-46-11-0700 .
@@ -258,20 +537,28 @@ directory disambiguates timestamp-looking legacy workspace names.
 There is no manifest or database.
 Within a workspace, archives are ordered by their actual instant and numeric
 collision suffix, with legacy archives first.
-Archival rejects dirty or unregistered worktrees and workspaces with active
-children, never overwrites files, and is safe to repeat after partial execution.
+.IP
+Dirty worktrees, unregistered checkout paths, layout mismatches, a missing
+workspace directory, and active child workspaces prevent archival;
+workspace-local entries do not.
+Archive or delete the children first, or point them at another parent.
+Archival never overwrites files and is safe to repeat after partial execution.
 Use
 .B \-\-force
-only to explicitly discard modified, untracked, or ignored worktree files.
+only to discard modified, untracked, or ignored worktree files; all other
+conflicts still prevent archival.
 Repeating a successful archive reports it as already archived while no new
 active workspace exists, selecting the newest generation or the legacy archive
 if it is the only one.
-Archives are excluded from the active workspace list and launcher; use
+.IP
+Archives are excluded from the active workspace list, the launcher, active
+workspace completion, and
+.BR path ;
+use
 .B list \-\-archived
 to see them.
-The JSON archive report includes
-.B archive_id
-alongside the existing fields.
+Forest does not close matching Herdr or Rex processes.
+The archive is local dormant storage, not a compressed archive or backup.
 .TP
 .BI unarchive " workspace [checkout ...] [\-\-archive ID] [\-\-as workspace]"
 Restore saved workspace-local files, optionally creating only the requested
@@ -299,6 +586,7 @@ Forest preflights all requested checkouts before moving files, refuses an
 existing active destination, and never overwrites files.
 Restoration consumes the selected archive and leaves other generations
 untouched.
+.IP
 If checkout creation fails after the move, repeat the command.
 When no matching archive remains and the destination is active,
 Forest reconciles requested checkouts and reports
@@ -308,27 +596,6 @@ Without a manifest, it cannot verify the workspace's origin or distinguish a
 well-formed nonexistent ID from a consumed one.
 Malformed IDs are rejected before reconciliation.
 Invalid IDs and ambiguous selections return conflict reports.
-The JSON report contains
-.BR source_workspace ,
-.BR workspace ,
-.BR path ,
-.BR archive_id ,
-.BR archive_path ,
-.BR repositories ,
-.BR status ,
-and
-.BR message .
-Status is
-.BR unarchived ,
-.BR already_active ,
-.BR conflict ,
-or
-.BR failed .
-Checkout reports use the same fields as
-.BR create .
-The archive path records the selected source, even after its move; it is null
-on a retry after consumption.
-The archive ID is null when none is selected or supplied.
 .TP
 .BI delete " workspace [\-\-force]"
 Permanently delete a workspace while preserving its Git branches.
@@ -344,10 +611,13 @@ with
 Dirty or unregistered worktrees and active child workspaces prevent deletion.
 Use
 .B \-\-force
-only to explicitly discard modified, untracked, or ignored files in registered
-worktrees; it does not delete branches or bypass unregistered-path checks.
+only to discard modified, untracked, or ignored files in registered worktrees;
+it does not delete branches or bypass unregistered-path checks.
 Deleting an active workspace preserves older archives of that name.
-If removal fails after staging, repeat the command to remove the pending files.
+.IP
+If removal fails after staging, the report is
+.BR failed ;
+repeat the command to remove the pending files.
 If a new active workspace has reused the name, retry refuses both paths until
 you rename the active workspace.
 With no active workspace, remaining registrations, or pending deletion, the
@@ -358,30 +628,41 @@ To delete an archive, including a legacy archive, restore it with
 (optionally using
 .BR \-\-as )
 and then delete the restored workspace.
-The JSON
-.B deleted_entries
-field lists deletion staging paths of removed workspace-local entries,
-excluding retained archives.
 .TP
 .B clean
-Remove stale Git registrations for manually deleted Forest worktrees.
-Forest uses
+Remove stale Git registrations for Forest worktrees whose directories were
+deleted outside Forest.
+Forest scans every configured canonical repository and uses
 .B git worktree remove
 for registrations beneath the active workspace root whose paths no longer
 exist.
 It preserves branches, ignores present worktrees, and does not affect stale
 registrations outside the configured workspace root or beneath
 .BR .archive .
-The command is safe to repeat.
+Every stale registration is attempted, and the command exits unsuccessfully if
+any removal fails.
+It is safe to repeat and succeeds with an empty report when nothing needs
+cleaning.
+Use
+.B remove
+or
+.B archive
+for normal retirement so Forest can reject dirty worktrees;
+.B clean
+cannot recover deleted contents.
 .TP
-.BI remove " workspace [checkout ...]"
+.BI remove " workspace [checkout ...] [\-\-force]"
 Remove all worktrees in a workspace or only the named checkouts.
-Removal rejects dirty or unregistered paths, uses
+Removal rejects dirty paths unless
+.B \-\-force
+is passed, which discards modified, untracked, and ignored files.
+Every selected path must be registered with its configured canonical
+repository, even with
+.BR \-\-force .
+Removal uses
 .B git worktree remove
 for present worktrees and stale registrations whose paths are already missing,
-preserves branches, and requires
-.B \-\-force
-before discarding modified, untracked, or ignored files.
+and preserves branches.
 Workspace-local files, including
 .BR .forest-workspace.toml ,
 are reported and preserved; only an empty workspace directory with no active
@@ -389,6 +670,13 @@ child workspaces is removed.
 Use
 .B delete
 to remove the workspace and its local files.
+.IP
+Naming checkouts leaves other worktrees in place:
+.B remove stacked api@part-2
+removes only that named checkout, and
+.B api
+means only the primary checkout.
+Repeating a partially completed removal is safe.
 .TP
 .BI completions " shell"
 Generate dynamic shell completion setup for
@@ -412,7 +700,8 @@ and
 .B remove
 mutations for a configuration so they cannot race one another.
 .SH SHELL COMPLETION
-Evaluate the generated setup from the shell startup file.
+Evaluate the generated setup from the shell startup file rather than saving
+its output, because the completion protocol is version-dependent.
 For Bash or Zsh:
 .PP
 .EX
@@ -430,6 +719,18 @@ For Fish:
 git-forest completions fish | source
 .EE
 .PP
+For Elvish:
+.PP
+.EX
+eval (git-forest completions elvish | slurp)
+.EE
+.PP
+For PowerShell:
+.PP
+.EX
+git-forest completions powershell | Out-String | Invoke-Expression
+.EE
+.PP
 Bash, Zsh, and Fish complete both
 .B git-forest
 and
@@ -441,43 +742,94 @@ Completion honors normal configuration discovery,
 and
 .BR \-\-config .
 It never contacts remotes, mutates worktrees, or invokes Herdr or Rex.
-Regenerate the setup after upgrading Forest.
+Invalid or missing configuration produces no configuration-dependent
+candidates.
 .SH CONFIGURATION
 Forest reads a
 .B .forest.toml
-file with a supported version, configured repositories, and workspace path and
-branch templates.
-The
-.B .archive
-directory directly beneath the configured workspace root is reserved for local
-archived workspace contents.
-Unless
-.B \-\-config
-or
-.B FOREST_CONFIG
-is set, Forest searches from the current directory toward the filesystem root.
+file:
 .PP
-Paths in the file are relative to the directory containing it.
-The repository remote template may use
-.BR {name} ,
-and the workspace branch template may use
+.EX
+version = 1
+
+[repositories]
+root = "src"
+remote = "git@github.com:example/{name}.git"
+members = [
+  "api",
+  "operator",
+]
+
+[workspaces]
+root = "src/.workspaces"
+branch = "user/{checkout}"
+
+[attach]
+multiplexer = "rex"
+rex_command = ["/opt/homebrew/bin/fish"]
+.EE
+.PP
+The file is the one named by
+.BR \-\-config ,
+then the one named by
+.BR FOREST_CONFIG ,
+then the first
+.B .forest.toml
+found by walking from the current directory to the filesystem root.
+All paths in it are relative to the directory containing it, including
+relative local remotes.
+.TP
+.B repositories.root
+The directory containing the canonical clones.
+.TP
+.B repositories.members
+The repositories.
+Each member is both its command-line name and its directory beneath the root.
+.TP
+.B repositories.remote
+The clone URL template, which must contain
+.BR {name} .
+It is optional;
+.B setup
+requires it only when a canonical clone is missing.
+.TP
+.B workspaces.root
+The directory containing workspaces.
+Forest reserves
+.B .archive
+directly beneath it for archived workspace contents.
+.TP
+.B workspaces.branch
+The branch template, which must contain
 .B {workspace}
-and
+or
 .BR {checkout} .
-The latter is the named slot when present and otherwise the workspace name.
-An optional
-.B [attach]
-table sets
-.BR multiplexer ,
-either
+.B {workspace}
+is the workspace name.
+.B {checkout}
+is the slot of a named checkout and the workspace name for a primary checkout.
+.TP
+.B attach.multiplexer
+Either
 .B herdr
 or
-.BR rex ,
-and
-.BR rex_command ,
-the program and arguments each terminal Forest opens in Rex runs instead of the
+.BR rex .
+The
+.B [attach]
+table is optional.
+.TP
+.B attach.rex_command
+The program and arguments each terminal Forest opens in Rex runs instead of the
 login shell.
-See the git-forest README for the complete format and policy.
+.PP
+Unknown placeholders, duplicate members, absolute roots, and unsupported
+configuration versions are rejected.
+.PP
+Workspace names and checkout slots must match
+.BR [A-Za-z0-9][A-Za-z0-9._-]* .
+The names "." and ".." are not valid.
+A single request may not contain checkout identifiers that differ only by ASCII
+case because they alias on case-insensitive filesystems.
 .SH ENVIRONMENT
 .TP
 .B FOREST_CONFIG
@@ -486,7 +838,7 @@ It has lower precedence than
 .BR \-\-config .
 .TP
 .B NO_COLOR
-Disable colored human-readable output.
+Disable colored human-readable output, including in the launcher.
 .TP
 .B PATH
 Used to find Git and, for
