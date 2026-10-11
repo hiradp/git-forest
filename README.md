@@ -5,9 +5,9 @@ One named workspace across many Git repositories, built from linked worktrees.
 Forest keeps a canonical clone of each repository and gives every workspace a
 directory with a worktree per repository. Git worktree metadata and the
 filesystem are the only state. Forest contacts remotes only for `setup`,
-`fetch`, and `update`, and never resets or deletes branches. Workspaces open as
-tabs in a running [Herdr](https://herdr.dev) or
-[Rex](https://www.superlogical.com/rex) session.
+`fetch`, and `update`, and never resets or deletes branches. `attach` hands a
+workspace to a command you configure, which opens it in your terminal
+multiplexer.
 
 ## Install
 
@@ -46,7 +46,7 @@ git forest add <workspace> <checkout>...          add worktrees to a workspace
 git forest list [--archived]               list workspaces as a tree, or archives
 git forest status [<workspace>]            show branch, dirty state, and upstream
 git forest path <workspace>                print the workspace path
-git forest attach <workspace>              open or focus the workspace in Herdr or Rex
+git forest attach <workspace>              open the workspace with the attach command
 git forest rename <workspace> <new>        rename without renaming branches
 git forest archive <workspace>             remove worktrees and save local files
 git forest unarchive <workspace> [<checkout>...]  restore saved local files
@@ -82,8 +82,8 @@ $ git forest archive logical-slots
   Every command is safe to rerun after a partial failure.
 - Dirty worktrees block `remove`, `archive`, and `delete` unless you pass
   `--force`. Branches are always preserved.
-- `--parent` nests a workspace under another. Attaching a workspace opens its
-  descendants as tabs beside it.
+- `--parent` nests a workspace under another. Attaching a workspace attaches
+  its descendants with it.
 - Every command except the launcher and `completions` takes `--json`.
 
 ## Configure
@@ -104,8 +104,7 @@ root = "src/.workspaces"
 branch = "user/{checkout}"
 
 [attach]
-multiplexer = "rex"
-rex_command = ["/opt/homebrew/bin/fish"]
+command = ["desk", "attach", "--plan", "-"]
 ```
 
 | Field                 | Meaning                                                        |
@@ -114,13 +113,17 @@ rex_command = ["/opt/homebrew/bin/fish"]
 | `repositories.remote` | Clone URL template for `setup`. Optional.                      |
 | `workspaces.root`     | Directory of workspaces.                                       |
 | `workspaces.branch`   | Branch template using `{workspace}` or `{checkout}`.           |
-| `attach.multiplexer`  | `herdr` or `rex`. Optional.                                    |
-| `attach.rex_command`  | Program each Rex terminal runs instead of the login shell.     |
+| `attach.command`      | Program and arguments `attach` pipes its JSON plan to.         |
 
 Paths are relative to the directory containing the file. `{checkout}` is the
 slot for a named checkout and the workspace name otherwise, so
 `user/{checkout}` gives `api` in `stacked` the branch `user/stacked` and
 `api@part-2` the branch `user/part-2`.
+
+`attach` needs `attach.command`. Forest writes a JSON plan of the workspace and
+its descendants to the command's standard input and reads a JSON report from
+its standard output; [`docs/json.md`](docs/json.md#attach-command) documents
+both.
 
 ## Reference
 

@@ -6,10 +6,8 @@ mod config;
 mod domain;
 mod error;
 mod git;
-mod herdr;
 mod launcher;
 mod output;
-mod rex;
 mod workspace;
 
 use std::process::ExitCode;
@@ -20,7 +18,6 @@ use crate::cli::{ArchiveArgs, AttachArgs, Cli, Command, CreateArgs, DeleteArgs, 
 use crate::config::Config;
 use crate::error::{AppError, Result};
 use crate::git::Git;
-use crate::herdr::Herdr;
 
 fn main() -> ExitCode {
     completion::handle_environment();
@@ -95,7 +92,6 @@ fn run_launcher(config: &Config) -> Result<u8> {
             execute(
                 &Command::Attach(AttachArgs {
                     workspace,
-                    multiplexer: None,
                     output: OutputArgs { json: false },
                 }),
                 config,
@@ -125,7 +121,6 @@ fn run_launcher(config: &Config) -> Result<u8> {
             execute(
                 &Command::Attach(AttachArgs {
                     workspace: workspace.clone(),
-                    multiplexer: None,
                     output: OutputArgs { json: false },
                 }),
                 config,
@@ -190,7 +185,7 @@ fn execute_many(
 }
 
 fn execute(command: &Command, config: &Config) -> Result<u8> {
-    let outcome = commands::run(command, config, &Git, &Herdr)?;
+    let outcome = commands::run(command, config, &Git)?;
     output::render(&outcome.report, command.json())?;
     Ok(outcome.exit_code)
 }

@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -20,278 +19,76 @@ struct WorkspaceFixture {
     root: PathBuf,
 }
 
-struct FakeHerdr {
-    bin: PathBuf,
-    log: PathBuf,
+/// A stand-in for the configured attach command. It records the plan it reads
+/// and answers with whatever the test prepared.
+struct AttachStub {
+    state: PathBuf,
 }
 
-impl FakeHerdr {
-    fn new(root: &Path) -> Self {
-        let bin = root.join("fake-herdr-bin");
-        let log = root.join("herdr-calls.log");
-        fs::create_dir(&bin).unwrap();
-        let executable = bin.join("herdr");
+impl AttachStub {
+    fn install(fixture: &WorkspaceFixture) -> Self {
+        let state = fixture.root.join("attach-stub");
+        fs::create_dir(&state).unwrap();
+        let executable = state.join("attach");
         fs::write(
             &executable,
             r#"#!/bin/sh
+state="$(dirname "$0")"
 if [ -n "${GIT_DIR:-}" ]; then
   printf 'inherited GIT_DIR\n' >&2
   exit 1
 fi
-
-{
-  separator=""
-  for argument in "$@"; do
-    printf '%s%s' "$separator" "$argument"
-    separator="$(printf '\t')"
-  done
-  printf '\n'
-} >> "$HERDR_FAKE_LOG"
-
-case "$1:$2" in
-  workspace:list)
-    if [ -n "${HERDR_WORKSPACES_RESPONSE:-}" ]; then
-      printf '%s\n' "$HERDR_WORKSPACES_RESPONSE"
-    else
-      printf '{"result":{"workspaces":[]}}\n'
-    fi
-    ;;
-  workspace:create)
-    label=""
-    previous=""
-    for argument in "$@"; do
-      if [ "$previous" = "--label" ]; then label="$argument"; fi
-      previous="$argument"
-    done
-    printf '{"result":{"workspace":{"workspace_id":"w-new"},"tab":{"tab_id":"w-new:t-main","label":"%s","pane_count":1},"root_pane":{"pane_id":"w-new:p-main","tab_id":"w-new:t-main"}}}\n' "$label"
-    ;;
-  tab:list)
-    if [ -n "${HERDR_TABS_RESPONSE:-}" ]; then
-      printf '%s\n' "$HERDR_TABS_RESPONSE"
-    else
-      printf '{"result":{"tabs":[]}}\n'
-    fi
-    ;;
-  tab:create)
-    label=""
-    workspace="w-new"
-    previous=""
-    for argument in "$@"; do
-      if [ "$previous" = "--label" ]; then label="$argument"; fi
-      if [ "$previous" = "--workspace" ]; then workspace="$argument"; fi
-      previous="$argument"
-    done
-    printf '{"result":{"tab":{"tab_id":"%s:t-%s","label":"%s","pane_count":1},"root_pane":{"pane_id":"%s:p-%s","tab_id":"%s:t-%s"}}}\n' "$workspace" "$label" "$label" "$workspace" "$label" "$workspace" "$label"
-    ;;
-  pane:list)
-    if [ -n "${HERDR_PANES_RESPONSE:-}" ]; then
-      printf '%s\n' "$HERDR_PANES_RESPONSE"
-    else
-      printf '{"result":{"panes":[]}}\n'
-    fi
-    ;;
-  *)
-    ;;
-
-esac
+printf '%s\n' "$@" > "$state/arguments"
+cat > "$state/plan.json"
+if [ -f "$state/stderr" ]; then
+  cat "$state/stderr" >&2
+fi
+if [ -f "$state/stdout" ]; then
+  cat "$state/stdout"
+fi
+if [ -f "$state/status" ]; then
+  exit "$(cat "$state/status")"
+fi
 "#,
         )
         .unwrap();
         let mut permissions = fs::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&executable, permissions).unwrap();
-        Self { bin, log }
+        configure_attach(
+            fixture,
+            &format!("command = [{:?}, \"--plan\", \"-\"]", path(&executable)),
+        );
+        Self { state }
     }
 
-    fn command(&self, current_dir: &Path) -> Command {
-        let existing_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![self.bin.clone()];
-        paths.extend(std::env::split_paths(&existing_path));
-        let command_path = std::env::join_paths(paths).unwrap();
-        let mut command = Command::new(binary());
-        command
-            .current_dir(current_dir)
-            .env_remove("FOREST_CONFIG")
-            .env_remove("HERDR_WORKSPACE_ID")
-            .env_remove("HERDR_TAB_ID")
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("REX_SESSION")
-            .env("PATH", command_path)
-            .env("HERDR_FAKE_LOG", &self.log);
-        command
+    fn answer(&self, report: &Value) {
+        self.answer_text(&report.to_string());
     }
 
-    fn calls(&self) -> Vec<String> {
-        fs::read_to_string(&self.log)
+    fn answer_text(&self, stdout: &str) {
+        fs::write(self.state.join("stdout"), stdout).unwrap();
+    }
+
+    fn fail(&self, status: u8, stderr: &str) {
+        fs::write(self.state.join("status"), status.to_string()).unwrap();
+        fs::write(self.state.join("stderr"), stderr).unwrap();
+    }
+
+    fn ran(&self) -> bool {
+        self.state.join("arguments").exists()
+    }
+
+    fn arguments(&self) -> Vec<String> {
+        fs::read_to_string(self.state.join("arguments"))
             .unwrap()
             .lines()
             .map(str::to_owned)
             .collect()
     }
-}
 
-struct FakeRex {
-    bin: PathBuf,
-    state: PathBuf,
-}
-
-impl FakeRex {
-    /// Answers from files in its state directory: `sessions.json`,
-    /// `windows-<session>.json`, and `cwd-<block>`.
-    fn new(root: &Path) -> Self {
-        let bin = root.join("fake-rex-bin");
-        let state = root.join("fake-rex-state");
-        fs::create_dir(&bin).unwrap();
-        fs::create_dir(&state).unwrap();
-        let executable = bin.join("rex");
-        fs::write(
-            &executable,
-            r#"#!/bin/sh
-if [ -n "${GIT_DIR:-}" ]; then
-  printf 'inherited GIT_DIR\n' >&2
-  exit 1
-fi
-
-{
-  separator=""
-  for argument in "$@"; do
-    printf '%s%s' "$separator" "$argument"
-    separator="$(printf '\t')"
-  done
-  printf '\n'
-} >> "$REX_FAKE_STATE/calls.log"
-
-if [ "$1" = "--autostart=false" ]; then shift; fi
-
-value_after() {
-  flag="$1"
-  shift
-  previous=""
-  for argument in "$@"; do
-    if [ "$previous" = "$flag" ]; then printf '%s' "$argument"; return; fi
-    previous="$argument"
-  done
-}
-
-case "$1:$2" in
-  ls:*)
-    if [ -f "$REX_FAKE_STATE/sessions.json" ]; then
-      cat "$REX_FAKE_STATE/sessions.json"
-    else
-      printf '{"sessions":[]}\n'
-    fi
-    ;;
-  window:ls)
-    windows="$REX_FAKE_STATE/windows-$(value_after --session "$@").json"
-    if [ -f "$windows" ]; then
-      cat "$windows"
-    else
-      printf '{"windows":[]}\n'
-    fi
-    ;;
-  new:*)
-    printf '{"session_id":"s-new","initial_windows":[{"window_id":"s-new:w-main","block_ids":["s-new:b-main"],"revision":1}]}\n'
-    ;;
-  window:new)
-    printf '{"window_id":"%s:w-%s","block_ids":["b-new"],"revision":2}\n' "$(value_after --session "$@")" "$5"
-    ;;
-  block:call)
-    cwd="$REX_FAKE_STATE/cwd-$(value_after --block "$@")"
-    if [ -f "$cwd" ]; then
-      printf '{"foreground":{"cwd":"%s"}}\n' "$(cat "$cwd")"
-    else
-      printf '{"foreground":null}\n'
-    fi
-    ;;
-  do:*)
-    if [ -f "$REX_FAKE_STATE/do-fails" ]; then
-      printf 'Error: no app client is connected\n\nUsage:\n  rex do\n' >&2
-      exit 1
-    fi
-    ;;
-  *)
-    ;;
-esac
-"#,
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions).unwrap();
-        Self { bin, state }
-    }
-
-    /// Puts this Rex ahead of whatever the command's `PATH` already holds.
-    fn install(&self, command: &mut Command) {
-        let existing_path = command
-            .get_envs()
-            .find_map(|(name, value)| (name == "PATH").then(|| value.map(OsStr::to_owned)))
-            .flatten()
-            .or_else(|| std::env::var_os("PATH"))
-            .unwrap_or_default();
-        let mut paths = vec![self.bin.clone()];
-        paths.extend(std::env::split_paths(&existing_path));
-        command
-            .env("PATH", std::env::join_paths(paths).unwrap())
-            .env("REX_FAKE_STATE", &self.state);
-    }
-
-    fn command(&self, current_dir: &Path) -> Command {
-        let mut command = Command::new(binary());
-        command
-            .current_dir(current_dir)
-            .env_remove("FOREST_CONFIG")
-            .env_remove("HERDR_WORKSPACE_ID")
-            .env_remove("REX_SESSION");
-        self.install(&mut command);
-        command
-    }
-
-    fn sessions(&self, sessions: Value) {
-        fs::write(
-            self.state.join("sessions.json"),
-            serde_json::json!({ "sessions": sessions }).to_string(),
-        )
-        .unwrap();
-    }
-
-    /// Each window is `(window_id, label, block_id)`.
-    fn windows(&self, session: &str, windows: &[(&str, &str, &str)]) {
-        let windows = windows
-            .iter()
-            .map(|(id, label, block)| {
-                serde_json::json!({
-                    "window_id": id,
-                    "label": label,
-                    "layers": [{"blocks": [{"block_id": block}]}]
-                })
-            })
-            .collect::<Vec<_>>();
-        fs::write(
-            self.state.join(format!("windows-{session}.json")),
-            serde_json::json!({ "windows": windows }).to_string(),
-        )
-        .unwrap();
-    }
-
-    fn cwd(&self, block: &str, cwd: &Path) {
-        fs::write(self.state.join(format!("cwd-{block}")), path(cwd)).unwrap();
-    }
-
-    fn called(&self) -> bool {
-        self.state.join("calls.log").exists()
-    }
-
-    fn calls(&self) -> Vec<String> {
-        fs::read_to_string(self.state.join("calls.log"))
-            .unwrap()
-            .lines()
-            .map(|line| {
-                line.strip_prefix("--autostart=false\t")
-                    .unwrap_or_else(|| panic!("{line:?} could start a Rex server"))
-                    .to_owned()
-            })
-            .collect()
+    fn plan(&self) -> Value {
+        serde_json::from_slice(&fs::read(self.state.join("plan.json")).unwrap()).unwrap()
     }
 }
 
@@ -1905,18 +1702,12 @@ fn saves_a_symbol_without_changing_workspace_or_branch_identity() {
 
     assert_success(&forest(&fixture.root, &["create", "topic"]));
     assert_success(&forest(&fixture.root, &["add", "topic", "beta"]));
-    let herdr = FakeHerdr::new(&fixture.root);
-    let attached = herdr
-        .command(&fixture.root)
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
+    let stub = AttachStub::install(&fixture);
+    stub.answer(&attach_report(&fixture, &["topic"]));
+    let attached = forest(&fixture.root, &["attach", "topic", "--json"]);
 
     assert_success(&attached);
-    assert!(herdr.calls().contains(&format!(
-        "workspace\tcreate\t--cwd\t{}\t--label\t🧑🏽‍💻 topic\t--no-focus",
-        fixture.workspace("topic").display()
-    )));
+    assert_eq!(stub.plan()["workspaces"][0]["symbol"], "🧑🏽‍💻");
 }
 
 #[test]
@@ -1969,15 +1760,12 @@ fn reads_edited_symbol_files_and_identifies_invalid_ones_before_attachment() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(&fixture.root, &["create", "topic"]));
     let symbol_path = fixture.workspace("topic").join(".forest-symbol");
-    let herdr = FakeHerdr::new(&fixture.root);
+    let stub = AttachStub::install(&fixture);
+    stub.answer(&attach_report(&fixture, &["topic"]));
 
     for contents in ["", " \r\n", "🌲 topic\n", "🌲\n🔥", "\u{1b}[31m"] {
         fs::write(&symbol_path, contents).unwrap();
-        let output = herdr
-            .command(&fixture.root)
-            .args(["attach", "topic", "--json"])
-            .output()
-            .unwrap();
+        let output = forest(&fixture.root, &["attach", "topic", "--json"]);
 
         assert_eq!(output.status.code(), Some(1), "accepted {contents:?}");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
@@ -1985,22 +1773,15 @@ fn reads_edited_symbol_files_and_identifies_invalid_ones_before_attachment() {
         assert!(message.contains(path(&symbol_path)), "{message}");
         assert!(message.contains("nonempty"), "{message}");
         assert!(!message.contains("invalid input"), "{message}");
-        assert!(!herdr.log.exists());
+        assert!(!stub.ran());
     }
     for contents in ["🌲\r\n", "🌲\n\n", "🌲 \t\n"] {
         fs::write(&symbol_path, contents).unwrap();
-        let output = herdr
-            .command(&fixture.root)
-            .args(["attach", "topic", "--json"])
-            .output()
-            .unwrap();
+        let output = forest(&fixture.root, &["attach", "topic", "--json"]);
 
         assert_success(&output);
-        assert!(herdr.calls().contains(&format!(
-            "workspace\tcreate\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
-            fixture.workspace("topic").display()
-        )));
-        fs::write(&herdr.log, "").unwrap();
+        assert_eq!(stub.plan()["workspaces"][0]["symbol"], "🌲", "{contents:?}");
+        fs::remove_file(stub.state.join("plan.json")).unwrap();
     }
 }
 
@@ -2078,14 +1859,10 @@ fn refuses_symbol_symlinks_without_changing_their_targets_or_creating_checkouts(
     assert!(!output.status.success());
     assert_eq!(fs::read_to_string(&target).unwrap(), "keep me\n");
     assert!(!fixture.workspace("topic").join("alpha").exists());
-    let herdr = FakeHerdr::new(&fixture.root);
-    let attached = herdr
-        .command(&fixture.root)
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
+    let stub = AttachStub::install(&fixture);
+    let attached = forest(&fixture.root, &["attach", "topic", "--json"]);
     assert!(!attached.status.success());
-    assert!(!herdr.log.exists());
+    assert!(!stub.ran());
 }
 
 #[test]
@@ -2099,18 +1876,18 @@ fn preserves_symbols_through_rename_archive_and_restore() {
     ] {
         assert_success(&forest(&fixture.root, &arguments));
     }
-    let herdr = FakeHerdr::new(&fixture.root);
-    assert_success(
-        &herdr
-            .command(&fixture.root)
-            .args(["attach", "renamed"])
-            .output()
-            .unwrap(),
+    let stub = AttachStub::install(&fixture);
+    stub.answer(&attach_report(&fixture, &["renamed"]));
+    assert_success(&forest(&fixture.root, &["attach", "renamed"]));
+    assert_eq!(
+        stub.plan()["workspaces"][0],
+        serde_json::json!({
+            "name": "renamed",
+            "symbol": "🌲",
+            "dir": path(&fixture.workspace("renamed")),
+            "parent": null
+        })
     );
-    assert!(herdr.calls().contains(&format!(
-        "workspace\tcreate\t--cwd\t{}\t--label\t🌲 renamed\t--no-focus",
-        fixture.workspace("renamed").display()
-    )));
 
     assert_success(&forest(&fixture.root, &["archive", "renamed"]));
     let archives = fixture.archives();
@@ -2146,753 +1923,222 @@ fn preserves_symbols_through_rename_archive_and_restore() {
 }
 
 #[test]
-fn attaches_a_standalone_workspace_as_a_single_main_tab() {
+fn pipes_a_plan_for_the_workspace_and_its_descendants_and_reports_the_answer() {
     let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "alpha", "gamma", "--json"],
-    ));
-    let herdr = FakeHerdr::new(&fixture.root);
+    for arguments in [
+        vec!["create", "program", "--symbol", "🌲"],
+        vec!["create", "project", "alpha", "--parent", "program"],
+        vec!["create", "topic", "--parent", "project"],
+        vec!["create", "other", "--parent", "project", "--symbol", "🚦"],
+        vec!["create", "zeta", "--parent", "other"],
+    ] {
+        assert_success(&forest(&fixture.root, &arguments));
+    }
+    let names = ["project", "other", "zeta", "topic"];
+    let stub = AttachStub::install(&fixture);
+    let mut answer = attach_report(&fixture, &names);
+    answer["workspaces"][3] = serde_json::json!({
+        "name": "topic",
+        "session_id": "s2",
+        "status": "reconciled",
+        "tab": {"label": "main", "dir": "/elsewhere", "id": "s2:t1", "status": "reused"}
+    });
+    stub.answer(&answer);
 
-    let output = herdr
-        .command(&fixture.root)
+    let output = Command::new(binary())
+        .current_dir(&fixture.root)
+        .env_remove("FOREST_CONFIG")
         .env("GIT_DIR", fixture.root.join("unrelated.git"))
-        .args(["attach", "topic", "--json"])
+        .args(["attach", "project", "--json"])
         .output()
         .unwrap();
 
     assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["workspace"], "topic");
-    assert_eq!(report["path"], path(&fixture.workspace("topic")));
-    assert_eq!(report["parent"], Value::Null);
-    assert_eq!(report["descendants"], serde_json::json!([]));
-    assert_eq!(report["herdr_workspace_id"], "w-new");
-    assert_eq!(report["status"], "created");
+    assert_eq!(stub.arguments(), ["--plan", "-"]);
+    let planned = |name: &str, symbol: Value, parent: &str| {
+        serde_json::json!({
+            "name": name,
+            "symbol": symbol,
+            "dir": path(&fixture.workspace(name)),
+            "parent": parent
+        })
+    };
     assert_eq!(
-        report["tabs"],
-        serde_json::json!([{
-            "label": "main",
-            "path": path(&fixture.workspace("topic")),
-            "herdr_tab_id": "w-new:t-main",
-            "status": "created"
-        }])
+        stub.plan(),
+        serde_json::json!({
+            "version": 1,
+            "parent": {
+                "name": "program",
+                "symbol": "🌲",
+                "dir": path(&fixture.workspace("program"))
+            },
+            "workspaces": [
+                planned("project", Value::Null, "program"),
+                planned("other", "🚦".into(), "project"),
+                planned("zeta", Value::Null, "other"),
+                planned("topic", Value::Null, "project"),
+            ]
+        })
     );
 
-    let calls = herdr.calls();
-    assert!(calls.contains(&format!(
-        "workspace\tcreate\t--cwd\t{}\t--label\ttopic\t--no-focus",
-        fixture.workspace("topic").display()
-    )));
-    assert!(calls.contains(&format!(
-        "workspace\treport-metadata\tw-new\t--source\tgit-forest\t--token\tgit_forest_id={}",
-        herdr_id(&fixture.workspace("topic"))
-    )));
-    assert!(
-        calls.contains(
-            &"pane\treport-metadata\tw-new:p-main\t--source\tgit-forest\t--token\tgit_forest_tab=main"
-                .to_owned()
+    let created = |name: &str, parent: &str| {
+        serde_json::json!({
+            "workspace": name,
+            "path": path(&fixture.workspace(name)),
+            "parent": parent,
+            "backend": "stub",
+            "session_id": "s1",
+            "status": "created",
+            "tabs": [{
+                "label": name,
+                "path": path(&fixture.workspace(name)),
+                "tab_id": format!("s1:{name}"),
+                "status": "created"
+            }],
+            "warnings": [],
+            "descendants": []
+        })
+    };
+    let mut expected = created("project", "program");
+    expected["descendants"] = serde_json::json!([
+        created("other", "project"),
+        created("zeta", "other"),
+        {
+            "workspace": "topic",
+            "path": path(&fixture.workspace("topic")),
+            "parent": "project",
+            "backend": "stub",
+            "session_id": "s2",
+            "status": "reconciled",
+            "tabs": [{"label": "main", "path": "/elsewhere", "tab_id": "s2:t1", "status": "reused"}],
+            "warnings": [],
+            "descendants": []
+        }
+    ]);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report, expected);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn plans_a_standalone_workspace_without_a_parent_or_symbol() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "topic", "alpha"]));
+    let stub = AttachStub::install(&fixture);
+    stub.answer(&attach_report(&fixture, &["topic"]));
+    let workspace = fixture.workspace("topic");
+
+    let output = forest(&fixture.root, &["attach", "topic"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stub.plan(),
+        serde_json::json!({
+            "version": 1,
+            "parent": null,
+            "workspaces": [
+                {"name": "topic", "symbol": null, "dir": path(&workspace), "parent": null}
+            ]
+        })
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            concat!(
+                "Workspace  topic\n",
+                "Path       {path}\n",
+                "Stub       s1\n",
+                "\n",
+                "  ✓ topic  created  {path}\n",
+            ),
+            path = workspace.display()
         )
     );
-    assert!(calls.contains(&"tab\trename\tw-new:t-main\tmain".to_owned()));
-    assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
-    assert_eq!(
-        &calls[calls.len() - 2..],
-        ["workspace\tfocus\tw-new", "tab\tfocus\tw-new:t-main"]
-    );
+    assert!(output.stderr.is_empty());
 }
+
 #[test]
-fn adopts_an_old_layout_workspace_without_touching_repository_tabs() {
+fn refuses_to_attach_without_a_usable_attach_command() {
     let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "alpha", "beta", "--json"],
-    ));
-    let herdr = FakeHerdr::new(&fixture.root);
-    let workspaces = serde_json::json!({"result": {"workspaces": [{
-        "workspace_id": "w-existing",
-        "tokens": {"git_forest_path": path(&fixture.workspace("topic"))}
-    }]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-existing:t-main", "label": "main", "pane_count": 1},
-        {"tab_id": "w-existing:t-alpha", "label": "alpha-old", "pane_count": 1}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-existing:p-main", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "tokens": {"git_forest_tab": "main"}},
-        {"pane_id": "w-existing:p-alpha", "workspace_id": "w-existing", "tab_id": "w-existing:t-alpha", "tokens": {"git_forest_tab": "repository:alpha"}}
-    ]}});
+    assert_success(&forest(&fixture.root, &["create", "topic"]));
 
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
+    let output = forest(&fixture.root, &["attach", "topic", "--json"]);
 
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["herdr_workspace_id"], "w-existing");
-    assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"].as_array().unwrap().len(), 1);
-    assert_eq!(report["tabs"][0]["herdr_tab_id"], "w-existing:t-main");
-    let calls = herdr.calls();
-    assert!(calls.contains(&format!(
-        "workspace\treport-metadata\tw-existing\t--source\tgit-forest\t--token\tgit_forest_id={}",
-        herdr_id(&fixture.workspace("topic"))
-    )));
-    assert!(!calls.iter().any(|call| {
-        call.starts_with("workspace\tcreate")
-            || call.starts_with("tab\tcreate")
-            || call.starts_with("tab\trename")
-            || call.starts_with("pane\treport-metadata")
-    }));
-    assert_eq!(
-        &calls[calls.len() - 2..],
-        [
-            "workspace\tfocus\tw-existing",
-            "tab\tfocus\tw-existing:t-main"
-        ]
-    );
-}
-#[test]
-fn recovers_the_main_tab_after_its_tagged_root_pane_is_closed() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "topic", "--json"]));
-    let herdr = FakeHerdr::new(&fixture.root);
-    let workspace = fixture.workspace("topic");
-    let workspace_path = path(&workspace);
-    let workspaces = serde_json::json!({"result": {"workspaces": [{
-        "workspace_id": "w-existing",
-        "tokens": {"git_forest_id": herdr_id(&workspace)}
-    }]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-existing:t-main", "label": "main", "pane_count": 2},
-        {"tab_id": "w-existing:t-child", "label": "child", "pane_count": 1}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-existing:p-first", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "cwd": workspace_path},
-        {"pane_id": "w-existing:p-second", "workspace_id": "w-existing", "tab_id": "w-existing:t-main", "cwd": workspace_path},
-        {"pane_id": "w-existing:p-child", "workspace_id": "w-existing", "tab_id": "w-existing:t-child", "cwd": workspace_path, "tokens": {"git_forest_tab": "workspace:0123456789abcdef"}}
-    ]}});
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["herdr_tab_id"], "w-existing:t-main");
-    let calls = herdr.calls();
-    assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|call| call.contains("git_forest_tab=main"))
-            .collect::<Vec<_>>(),
-        [
-            "pane\treport-metadata\tw-existing:p-first\t--source\tgit-forest\t--token\tgit_forest_tab=main"
-        ]
-    );
-}
-#[test]
-fn recovers_an_untagged_partial_herdr_workspace() {
-    for (symbol, label) in [
-        (None, "topic"),
-        (Some("🌲"), "🌲 topic"),
-        (Some("🌲"), "topic"),
-        (Some("🔥"), "🌲 topic"),
-    ] {
-        let fixture = WorkspaceFixture::new();
-        assert_success(&forest(
-            &fixture.root,
-            &["create", "topic", "alpha", "beta", "--json"],
-        ));
-        if let Some(symbol) = symbol {
-            assert_success(&forest(
-                &fixture.root,
-                &["create", "topic", "--symbol", symbol],
-            ));
-        }
-        let herdr = FakeHerdr::new(&fixture.root);
-        let workspaces = serde_json::json!({
-            "result": {
-                "workspaces": [{
-                    "workspace_id": "w-partial",
-                    "label": label
-                }]
-            }
-        });
-        let tabs = serde_json::json!({
-            "result": {
-                "tabs": [
-                    {"tab_id": "w-partial:t-main", "label": "topic", "pane_count": 1}
-                ]
-            }
-        });
-        let panes = serde_json::json!({
-            "result": {
-                "panes": [{
-                    "pane_id": "w-partial:p-main",
-                    "tab_id": "w-partial:t-main",
-                    "cwd": path(&fixture.workspace("topic"))
-                }]
-            }
-        });
-
-        let output = herdr
-            .command(&fixture.root)
-            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-            .env("HERDR_TABS_RESPONSE", tabs.to_string())
-            .env("HERDR_PANES_RESPONSE", panes.to_string())
-            .args(["attach", "topic", "--json"])
-            .output()
-            .unwrap();
-
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(report["herdr_workspace_id"], "w-partial");
-        assert_eq!(report["status"], "reconciled");
-        assert_eq!(report["tabs"].as_array().unwrap().len(), 1);
-        assert_eq!(report["tabs"][0]["status"], "reconciled");
-
-        let calls = herdr.calls();
-        assert!(
-            !calls
-                .iter()
-                .any(|call| call.starts_with("workspace\tcreate"))
-        );
-        assert!(calls.contains(&format!(
-        "workspace\treport-metadata\tw-partial\t--source\tgit-forest\t--token\tgit_forest_id={}",
-        herdr_id(&fixture.workspace("topic"))
-    )));
-        assert!(calls.contains(&"pane\treport-metadata\tw-partial:p-main\t--source\tgit-forest\t--token\tgit_forest_tab=main".to_owned()));
-        let main_label = symbol.map_or("main".to_owned(), |symbol| format!("{symbol} main"));
-        assert!(calls.contains(&format!("tab\trename\tw-partial:t-main\t{main_label}")));
-        let renames = calls
-            .iter()
-            .filter(|call| call.starts_with("workspace\trename"))
-            .collect::<Vec<_>>();
-        if let Some(symbol) = symbol
-            && label != format!("{symbol} topic")
-        {
-            assert_eq!(
-                renames,
-                [&format!("workspace\trename\tw-partial\t{symbol} topic")]
-            );
-        } else {
-            assert!(renames.is_empty());
-        }
-    }
-}
-
-#[test]
-fn rejects_ambiguous_partial_herdr_workspaces_with_earlier_symbols() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--symbol", "🧭"],
-    ));
-    let herdr = FakeHerdr::new(&fixture.root);
-    let workspaces = serde_json::json!({"result": {"workspaces": [
-        {"workspace_id": "w-first", "label": "🌲 topic"},
-        {"workspace_id": "w-second", "label": "🔥 topic"}
-    ]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "t-main", "label": "topic"}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "p-main", "tab_id": "t-main", "cwd": path(&fixture.workspace("topic"))}
-    ]}});
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert!(
-        error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("multiple untagged Herdr workspaces match")
-    );
-    assert_eq!(
-        herdr.calls(),
-        [
-            "workspace\tlist",
-            "pane\tlist",
-            "tab\tlist\t--workspace\tw-first",
-            "pane\tlist\t--workspace\tw-first",
-            "tab\tlist\t--workspace\tw-second",
-            "pane\tlist\t--workspace\tw-second",
-        ]
-    );
-}
-
-#[test]
-fn rejects_multiple_matching_herdr_workspaces_before_mutation() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "alpha", "--json"],
-    ));
-    let herdr = FakeHerdr::new(&fixture.root);
-    let workspaces = serde_json::json!({
-        "result": {
-            "workspaces": [
-                {
-                    "workspace_id": "w-first",
-                    "tokens": {"git_forest_id": herdr_id(&fixture.workspace("topic"))}
-                },
-                {
-                    "workspace_id": "w-second",
-                    "tokens": {"git_forest_id": herdr_id(&fixture.workspace("topic"))}
-                }
-            ]
-        }
-    });
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(error["error"]["exit_code"], 1);
+    let message = error["error"]["message"].as_str().unwrap();
     assert!(
-        error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("multiple Herdr workspaces match")
+        message.contains("attach.command is not configured"),
+        "{message}"
     );
-    assert_eq!(herdr.calls(), ["workspace\tlist"]);
+
+    configure_attach(&fixture, r#"command = ["", "--plan", "-"]"#);
+
+    let output = forest(&fixture.root, &["attach", "topic", "--json"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("attach.command must start with a program"),
+        "{message}"
+    );
 }
 
 #[test]
-fn reuses_a_complete_herdr_workspace_without_duplicating_tabs() {
-    for (symbol, label, main_label, renamed) in [
-        (None, "custom name", "main", false),
-        (Some("🌲"), "🌲 topic", "🌲 main", false),
-        (Some("🧑🏽‍💻"), "🌲 topic", "🌲 main", true),
-    ] {
-        let fixture = WorkspaceFixture::new();
-        assert_success(&forest(
-            &fixture.root,
-            &["create", "topic", "alpha", "beta", "--json"],
-        ));
-        if let Some(symbol) = symbol {
-            assert_success(&forest(
-                &fixture.root,
-                &["create", "topic", "--symbol", "🌲"],
-            ));
-            assert_success(&forest(
-                &fixture.root,
-                &["create", "topic", "--symbol", symbol],
-            ));
-        }
-        let herdr = FakeHerdr::new(&fixture.root);
-        let workspaces = serde_json::json!({
-            "result": {
-                "workspaces": [{
-                    "workspace_id": "w-existing",
-                    "label": label,
-                    "tokens": {"git_forest_id": herdr_id(&fixture.workspace("topic"))}
-                }]
-            }
-        });
-        let tabs = serde_json::json!({
-            "result": {
-                "tabs": [
-                    {"tab_id": "w-existing:t-main", "label": main_label, "pane_count": 1},
-                    {"tab_id": "w-existing:t-alpha", "label": "alpha", "pane_count": 1},
-                    {"tab_id": "w-existing:t-beta", "label": "beta", "pane_count": 1}
-                ]
-            }
-        });
-        let panes = serde_json::json!({
-            "result": {
-                "panes": [
-                    {"pane_id": "w-existing:p-main", "tab_id": "w-existing:t-main", "tokens": {"git_forest_tab": "main"}},
-                    {"pane_id": "w-existing:p-alpha", "tab_id": "w-existing:t-alpha", "tokens": {"git_forest_tab": "repository:alpha"}},
-                    {"pane_id": "w-existing:p-beta", "tab_id": "w-existing:t-beta", "tokens": {"git_forest_tab": "repository:beta"}}
-                ]
-            }
-        });
+fn reports_a_failing_attach_command_with_its_exit_status() {
+    let fixture = WorkspaceFixture::new();
+    assert_success(&forest(&fixture.root, &["create", "topic"]));
+    let stub = AttachStub::install(&fixture);
+    stub.answer(&attach_report(&fixture, &["topic"]));
+    stub.fail(3, "no session is running\n");
 
-        let output = herdr
-            .command(&fixture.root)
-            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-            .env("HERDR_TABS_RESPONSE", tabs.to_string())
-            .env("HERDR_PANES_RESPONSE", panes.to_string())
-            .args(["attach", "topic", "--json"])
-            .output()
-            .unwrap();
+    let output = forest(&fixture.root, &["attach", "topic"]);
 
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            report["status"],
-            if renamed { "reconciled" } else { "reused" }
-        );
-        assert_eq!(report["herdr_workspace_id"], "w-existing");
-        assert_eq!(
-            report["tabs"][0]["status"],
-            if renamed { "reconciled" } else { "reused" }
-        );
-        let calls = herdr.calls();
-        assert!(!calls.iter().any(|call| {
-            call.starts_with("workspace\tcreate")
-                || call.starts_with("tab\tcreate")
-                || call.starts_with("pane\treport-metadata")
-        }));
-        let tab_renames = calls
-            .iter()
-            .filter(|call| call.starts_with("tab\trename"))
-            .collect::<Vec<_>>();
-        if renamed {
-            assert_eq!(
-                tab_renames,
-                [&format!(
-                    "tab\trename\tw-existing:t-main\t{} main",
-                    symbol.unwrap()
-                )]
-            );
-        } else {
-            assert!(tab_renames.is_empty());
-        }
-        let renames = calls
-            .iter()
-            .filter(|call| call.starts_with("workspace\trename"))
-            .collect::<Vec<_>>();
-        if renamed {
-            assert_eq!(
-                renames,
-                [&format!(
-                    "workspace\trename\tw-existing\t{} topic",
-                    symbol.unwrap()
-                )]
-            );
-        } else {
-            assert!(renames.is_empty());
-        }
-    }
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("no session is running\n"), "{stderr}");
+    let error = stderr.lines().last().unwrap();
+    assert!(error.starts_with("error: attach command"), "{stderr}");
+    assert!(error.contains(path(&stub.state.join("attach"))), "{stderr}");
+    assert!(error.contains("exit status: 3"), "{stderr}");
 }
 
 #[test]
-fn opens_a_child_as_a_tab_only_from_inside_its_parents_herdr_workspace() {
+fn rejects_an_attach_report_that_does_not_answer_the_plan() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(&fixture.root, &["create", "project"]));
     assert_success(&forest(
         &fixture.root,
-        &["create", "topic", "--parent", "project", "--symbol", "🌲"],
-    ));
-    let topic = fixture.workspace("topic");
-    let workspaces = serde_json::json!({"result": {"workspaces": [{
-        "workspace_id": "w-project",
-        "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}
-    }]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "main"}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}}
-    ]}});
-
-    for (index, current) in [Some("w-project"), Some("w-other"), None]
-        .into_iter()
-        .enumerate()
-    {
-        let herdr_root = fixture.root.join(format!("herdr-{index}"));
-        fs::create_dir(&herdr_root).unwrap();
-        let herdr = FakeHerdr::new(&herdr_root);
-        let mut command = herdr.command(&fixture.root);
-        command
-            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-            .env("HERDR_TABS_RESPONSE", tabs.to_string())
-            .env("HERDR_PANES_RESPONSE", panes.to_string())
-            .args(["attach", "topic", "--json"]);
-        if let Some(current) = current {
-            command.env("HERDR_WORKSPACE_ID", current);
-        }
-
-        let output = command.output().unwrap();
-
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(report["parent"], "project");
-        assert_eq!(report["status"], "created");
-        let calls = herdr.calls();
-        if current == Some("w-project") {
-            assert_eq!(report["herdr_workspace_id"], "w-project");
-            assert_eq!(report["tabs"][0]["label"], "🌲 topic");
-            assert!(calls.contains(&format!(
-                "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
-                topic.display()
-            )));
-            assert!(calls.contains(&format!(
-                "pane\treport-metadata\tw-project:p-🌲 topic\t--source\tgit-forest\t--token\tgit_forest_tab=workspace:{}",
-                herdr_id(&topic)
-            )));
-            assert!(
-                !calls
-                    .iter()
-                    .any(|call| call.starts_with("workspace\tcreate"))
-            );
-            assert_eq!(
-                &calls[calls.len() - 2..],
-                [
-                    "workspace\tfocus\tw-project",
-                    "tab\tfocus\tw-project:t-🌲 topic"
-                ]
-            );
-        } else {
-            assert_eq!(report["herdr_workspace_id"], "w-new");
-            assert_eq!(report["tabs"][0]["label"], "🌲 main");
-            assert!(calls.contains(&format!(
-                "workspace\tcreate\t--cwd\t{}\t--label\t🌲 topic\t--no-focus",
-                topic.display()
-            )));
-            assert!(!calls.iter().any(|call| call.starts_with("tab\tcreate")));
-        }
-    }
-}
-
-#[test]
-fn opens_a_child_as_a_tab_in_an_untagged_parent_herdr_workspace() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "project", "--symbol", "🔧"],
-    ));
-    assert_success(&forest(
-        &fixture.root,
         &["create", "topic", "--parent", "project"],
     ));
-    let project = fixture.workspace("project");
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "main"}
-    ]}});
-    // Two panes in the main tab, so the parent is not a recoverable partial workspace.
-    let panes = |cwd: &Path| {
-        serde_json::json!({"result": {"panes": [
-            {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "cwd": path(cwd)},
-            {"pane_id": "w-project:p-split", "workspace_id": "w-project", "tab_id": "w-project:t-main", "cwd": path(cwd)}
-        ]}})
-    };
+    let stub = AttachStub::install(&fixture);
+    let mut unknown_status = attach_report(&fixture, &["project", "topic"]);
+    unknown_status["workspaces"][1]["status"] = "opened".into();
 
-    for (index, (label, cwd, nested)) in [
-        ("🔧 project", project.as_path(), true),
-        ("🔧 project", fixture.root.as_path(), false),
-        ("unrelated", project.as_path(), false),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let herdr_root = fixture.root.join(format!("herdr-{index}"));
-        fs::create_dir(&herdr_root).unwrap();
-        let herdr = FakeHerdr::new(&herdr_root);
-        let workspaces = serde_json::json!({"result": {"workspaces": [
-            {"workspace_id": "w-project", "label": label}
-        ]}});
+    for answer in [
+        String::new(),
+        "attached project\n".to_owned(),
+        serde_json::json!({"backend": "stub"}).to_string(),
+        attach_report(&fixture, &["project"]).to_string(),
+        attach_report(&fixture, &["topic", "project"]).to_string(),
+        unknown_status.to_string(),
+    ] {
+        stub.answer_text(&answer);
 
-        let output = herdr
-            .command(&fixture.root)
-            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-            .env("HERDR_TABS_RESPONSE", tabs.to_string())
-            .env("HERDR_PANES_RESPONSE", panes(cwd).to_string())
-            .env("HERDR_WORKSPACE_ID", "w-project")
-            .args(["attach", "topic", "--json"])
-            .output()
-            .unwrap();
+        let output = forest(&fixture.root, &["attach", "project", "--json"]);
 
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let calls = herdr.calls();
-        let tags_parent = format!(
-            "workspace\treport-metadata\tw-project\t--source\tgit-forest\t--token\tgit_forest_id={}",
-            herdr_id(&project)
+        assert_eq!(output.status.code(), Some(1), "accepted {answer:?}");
+        assert!(output.stdout.is_empty(), "{answer:?}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("returned an unexpected report"),
+            "{message}"
         );
-        if nested {
-            assert_eq!(report["herdr_workspace_id"], "w-project");
-            assert_eq!(report["tabs"][0]["label"], "topic");
-            assert!(calls.contains(&tags_parent));
-            assert!(
-                !calls
-                    .iter()
-                    .any(|call| call.starts_with("workspace\tcreate"))
-            );
-        } else {
-            assert_eq!(report["herdr_workspace_id"], "w-new");
-            assert!(!calls.contains(&tags_parent));
-        }
     }
-}
-
-#[test]
-fn places_descendants_beside_an_open_parent_and_focuses_open_workspaces() {
-    let fixture = WorkspaceFixture::new();
-    for arguments in [
-        vec!["create", "project"],
-        vec!["create", "topic", "--parent", "project"],
-        vec!["create", "slot", "--parent", "topic"],
-    ] {
-        assert_success(&forest(&fixture.root, &arguments));
-    }
-    let topic = fixture.workspace("topic");
-    let workspaces = serde_json::json!({"result": {"workspaces": [
-        {"workspace_id": "w-project", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}},
-        {"workspace_id": "w-elsewhere"}
-    ]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "main"},
-        {"tab_id": "w-project:t-topic", "label": "old"}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}},
-        {"pane_id": "w-project:p-topic", "workspace_id": "w-project", "tab_id": "w-project:t-topic", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&topic))}}
-    ]}});
-    let attach = |index: usize, workspace: &str, current: &str| {
-        let herdr_root = fixture.root.join(format!("herdr-{index}"));
-        fs::create_dir(&herdr_root).unwrap();
-        let herdr = FakeHerdr::new(&herdr_root);
-        let output = herdr
-            .command(&fixture.root)
-            .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-            .env("HERDR_TABS_RESPONSE", tabs.to_string())
-            .env("HERDR_PANES_RESPONSE", panes.to_string())
-            .env("HERDR_WORKSPACE_ID", current)
-            .args(["attach", workspace, "--json"])
-            .output()
-            .unwrap();
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        (report, herdr.calls())
-    };
-
-    let (report, calls) = attach(0, "slot", "w-project");
-
-    assert_eq!(report["herdr_workspace_id"], "w-project");
-    assert_eq!(report["tabs"][0]["label"], "slot");
-    assert!(calls.contains(&format!(
-        "tab\tcreate\t--workspace\tw-project\t--cwd\t{}\t--label\tslot\t--no-focus",
-        fixture.workspace("slot").display()
-    )));
-
-    let (report, calls) = attach(1, "topic", "w-elsewhere");
-
-    assert_eq!(report["herdr_workspace_id"], "w-project");
-    assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["label"], "topic");
-    assert!(!calls.iter().any(|call| {
-        call.starts_with("workspace\tcreate")
-            || (call.starts_with("tab\tcreate")
-                && call.contains(&format!("\t--cwd\t{}\t", topic.display())))
-    }));
-    assert_eq!(report["descendants"][0]["workspace"], "slot");
-    assert_eq!(report["descendants"][0]["herdr_workspace_id"], "w-project");
-    assert!(calls.contains(&"tab\trename\tw-project:t-topic\ttopic".to_owned()));
-    assert_eq!(
-        &calls[calls.len() - 2..],
-        [
-            "workspace\tfocus\tw-project",
-            "tab\tfocus\tw-project:t-topic"
-        ]
-    );
-}
-
-#[test]
-fn recovers_a_child_tab_after_its_tagged_pane_is_closed() {
-    let fixture = WorkspaceFixture::new();
-    for arguments in [
-        vec!["create", "project"],
-        vec!["create", "topic", "--parent", "project"],
-    ] {
-        assert_success(&forest(&fixture.root, &arguments));
-    }
-    let topic = fixture.workspace("topic");
-    let workspaces = serde_json::json!({"result": {"workspaces": [
-        {"workspace_id": "w-project", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}}
-    ]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-project:t-main", "label": "main"},
-        {"tab_id": "w-project:t-topic", "label": "topic"},
-        {"tab_id": "w-project:t-owned", "label": "topic"}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-project:p-main", "workspace_id": "w-project", "tab_id": "w-project:t-main", "tokens": {"git_forest_tab": "main"}},
-        {"pane_id": "w-project:p-split", "workspace_id": "w-project", "tab_id": "w-project:t-topic", "cwd": path(&topic)},
-        {"pane_id": "w-project:p-owner", "workspace_id": "w-project", "tab_id": "w-project:t-owned", "tokens": {"git_forest_tab": "workspace:0123456789abcdef"}},
-        {"pane_id": "w-project:p-visitor", "workspace_id": "w-project", "tab_id": "w-project:t-owned", "cwd": path(&topic)}
-    ]}});
-    let herdr = FakeHerdr::new(&fixture.root);
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .env("HERDR_WORKSPACE_ID", "w-elsewhere")
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["herdr_workspace_id"], "w-project");
-    assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["herdr_tab_id"], "w-project:t-topic");
-    let calls = herdr.calls();
-    assert!(calls.contains(&format!(
-        "pane\treport-metadata\tw-project:p-split\t--source\tgit-forest\t--token\tgit_forest_tab=workspace:{}",
-        herdr_id(&topic)
-    )));
-    assert!(
-        !calls.iter().any(|call| {
-            call.starts_with("workspace\tcreate") || call.starts_with("tab\tcreate")
-        })
-    );
-
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "slot", "--parent", "topic"],
-    ));
-    let herdr_root = fixture.root.join("herdr-slot");
-    fs::create_dir(&herdr_root).unwrap();
-    let herdr = FakeHerdr::new(&herdr_root);
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .env("HERDR_WORKSPACE_ID", "w-project")
-        .args(["attach", "slot", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["herdr_workspace_id"], "w-project");
-    assert!(herdr.calls().iter().any(|call| {
-        call.starts_with("tab\tcreate\t--workspace\tw-project\t") && call.contains("\tslot\t")
-    }));
 }
 
 fn configure_attach(fixture: &WorkspaceFixture, settings: &str) {
@@ -2901,375 +2147,25 @@ fn configure_attach(fixture: &WorkspaceFixture, settings: &str) {
     fs::write(config, format!("{contents}\n[attach]\n{settings}\n")).unwrap();
 }
 
-fn is_rex_mutation(call: &str) -> bool {
-    ["new\t", "window\tnew", "window\trename", "session\trename"]
+/// A report that attaches each workspace as a new tab of one session.
+fn attach_report(fixture: &WorkspaceFixture, names: &[&str]) -> Value {
+    let workspaces = names
         .iter()
-        .any(|prefix| call.starts_with(prefix))
-}
-
-#[test]
-fn chooses_the_multiplexer_from_flag_then_config_then_environment() {
-    // (flag, configured, inside Herdr, inside Rex, expected)
-    let cases = [
-        (None, None, false, false, "herdr"),
-        (None, None, false, true, "rex"),
-        (None, None, true, true, "herdr"),
-        (None, Some("rex"), true, false, "rex"),
-        (Some("herdr"), Some("rex"), false, true, "herdr"),
-        (Some("rex"), Some("herdr"), true, false, "rex"),
-    ];
-    for (flag, configured, in_herdr, in_rex, expected) in cases {
-        let fixture = WorkspaceFixture::new();
-        assert_success(&forest(&fixture.root, &["create", "topic"]));
-        if let Some(configured) = configured {
-            configure_attach(&fixture, &format!("multiplexer = {configured:?}"));
-        }
-        let herdr = FakeHerdr::new(&fixture.root);
-        let rex = FakeRex::new(&fixture.root);
-        let mut command = herdr.command(&fixture.root);
-        rex.install(&mut command);
-        command.args(["attach", "topic", "--json"]);
-        if let Some(flag) = flag {
-            command.args(["--multiplexer", flag]);
-        }
-        if in_herdr {
-            command.env("HERDR_WORKSPACE_ID", "w-other");
-        }
-        if in_rex {
-            command.env("REX_SESSION", "s-other");
-        }
-
-        let output = command.output().unwrap();
-
-        let case = format!("{flag:?} {configured:?} {in_herdr} {in_rex}");
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(report["multiplexer"], expected, "{case}");
-        assert_eq!(rex.called(), expected == "rex", "{case}");
-        assert_eq!(herdr.log.exists(), expected == "herdr", "{case}");
-    }
-}
-
-#[test]
-fn attaches_a_standalone_workspace_as_a_rex_session() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "alpha", "--symbol", "🌲"],
-    ));
-    configure_attach(&fixture, r#"rex_command = ["/bin/fish", "--login"]"#);
-    let rex = FakeRex::new(&fixture.root);
-    let topic = fixture.workspace("topic");
-
-    let output = rex
-        .command(&fixture.root)
-        .env("GIT_DIR", fixture.root.join("unrelated.git"))
-        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        report,
-        serde_json::json!({
-            "workspace": "topic",
-            "path": path(&topic),
-            "parent": null,
-            "multiplexer": "rex",
-            "rex_session_id": "s-new",
-            "status": "created",
-            "tabs": [{
-                "label": "🌲 main",
-                "path": path(&topic),
-                "rex_window_id": "s-new:w-main",
-                "status": "created"
-            }],
-            "warnings": [],
-            "descendants": []
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "session_id": "s1",
+                "status": "created",
+                "tab": {
+                    "label": name,
+                    "dir": path(&fixture.workspace(name)),
+                    "id": format!("s1:{name}"),
+                    "status": "created"
+                }
+            })
         })
-    );
-    assert_eq!(
-        rex.calls(),
-        [
-            "ls\t--json".to_owned(),
-            format!(
-                "new\t🌲 topic\t--window\t🌲 main\t--cwd\t{}\t--json\t--\t/bin/fish\t--login",
-                topic.display()
-            ),
-            "window\tfocus\t--session\ts-new\ts-new:w-main".to_owned(),
-            "do\tsession.select\tsession_id=s-new\twindow_id=s-new:w-main".to_owned(),
-        ]
-    );
-}
-
-#[test]
-fn reuses_and_reconciles_a_workspace_already_open_in_rex() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "project"]));
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--parent", "project", "--symbol", "🌲"],
-    ));
-    let rex = FakeRex::new(&fixture.root);
-    rex.sessions(serde_json::json!([
-        {"session_id": "s-desk", "label": "main"},
-        {"session_id": "s-project", "label": "project"}
-    ]));
-    rex.windows("s-desk", &[("s-desk:w-1", "notes", "b-notes")]);
-    rex.windows(
-        "s-project",
-        &[
-            ("s-project:w-main", "main", "b-main"),
-            ("s-project:w-topic", "topic", "b-topic"),
-        ],
-    );
-
-    let output = rex
-        .command(&fixture.root)
-        .args(["attach", "project", "--multiplexer", "rex", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["rex_session_id"], "s-project");
-    assert_eq!(report["status"], "reused");
-    assert_eq!(report["tabs"][0]["rex_window_id"], "s-project:w-main");
-    assert_eq!(report["tabs"][0]["status"], "reused");
-    let topic = &report["descendants"][0];
-    assert_eq!(topic["rex_session_id"], "s-project");
-    assert_eq!(topic["status"], "reconciled");
-    assert_eq!(topic["tabs"][0]["label"], "🌲 topic");
-    assert_eq!(topic["tabs"][0]["rex_window_id"], "s-project:w-topic");
-    let calls = rex.calls();
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|call| is_rex_mutation(call))
-            .collect::<Vec<_>>(),
-        ["window\trename\t--session\ts-project\ts-project:w-topic\t🌲 topic"]
-    );
-    assert_eq!(
-        calls[calls.len() - 2],
-        "window\tfocus\t--session\ts-project\ts-project:w-main"
-    );
-}
-
-#[test]
-fn renames_a_rex_session_whose_workspace_gained_a_symbol() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--symbol", "🌲"],
-    ));
-    let rex = FakeRex::new(&fixture.root);
-    rex.sessions(serde_json::json!([{"session_id": "s-topic", "label": "topic"}]));
-    rex.windows("s-topic", &[("s-topic:w-shell", "shell", "b-shell")]);
-
-    let output = rex
-        .command(&fixture.root)
-        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["status"], "created");
-    assert_eq!(report["tabs"][0]["rex_window_id"], "s-topic:w-🌲 main");
-    let calls = rex.calls();
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|call| is_rex_mutation(call))
-            .collect::<Vec<_>>(),
-        [
-            &format!(
-                "window\tnew\t--session\ts-topic\t🌲 main\t--cwd\t{}\t--focus=false\t--json",
-                fixture.workspace("topic").display()
-            ),
-            "session\trename\ts-topic\t🌲 topic"
-        ]
-    );
-}
-
-#[test]
-fn renames_a_rex_main_tab_whose_workspace_gained_a_symbol() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--symbol", "🌲"],
-    ));
-    let rex = FakeRex::new(&fixture.root);
-    rex.sessions(serde_json::json!([{"session_id": "s-topic", "label": "🌲 topic"}]));
-    rex.windows("s-topic", &[("s-topic:w-main", "main", "b-main")]);
-
-    let output = rex
-        .command(&fixture.root)
-        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "reconciled");
-    assert_eq!(report["tabs"][0]["label"], "🌲 main");
-    assert_eq!(report["tabs"][0]["status"], "reconciled");
-    assert_eq!(
-        rex.calls()
-            .iter()
-            .filter(|call| is_rex_mutation(call))
-            .collect::<Vec<_>>(),
-        ["window\trename\t--session\ts-topic\ts-topic:w-main\t🌲 main"]
-    );
-}
-
-#[test]
-fn opens_a_child_as_a_tab_only_from_inside_its_parents_rex_session() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "project"]));
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--parent", "project"],
-    ));
-    let topic = fixture.workspace("topic");
-
-    for (index, current) in [Some("s-project"), Some("s-desk"), None]
-        .into_iter()
-        .enumerate()
-    {
-        let rex_root = fixture.root.join(format!("rex-{index}"));
-        fs::create_dir(&rex_root).unwrap();
-        let rex = FakeRex::new(&rex_root);
-        rex.sessions(serde_json::json!([
-            {"session_id": "s-desk", "label": "main"},
-            {"session_id": "s-project", "label": "project"}
-        ]));
-        rex.windows("s-project", &[("s-project:w-main", "main", "b-main")]);
-        let mut command = rex.command(&fixture.root);
-        command.args(["attach", "topic", "--multiplexer", "rex", "--json"]);
-        if let Some(current) = current {
-            command.env("REX_SESSION", current);
-        }
-
-        let output = command.output().unwrap();
-
-        assert_success(&output);
-        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let calls = rex.calls();
-        if current == Some("s-project") {
-            assert_eq!(report["rex_session_id"], "s-project");
-            assert_eq!(report["tabs"][0]["label"], "topic");
-            assert!(calls.contains(&format!(
-                "window\tnew\t--session\ts-project\ttopic\t--cwd\t{}\t--focus=false\t--json",
-                topic.display()
-            )));
-            assert!(!calls.iter().any(|call| call.starts_with("new\t")));
-        } else {
-            assert_eq!(report["rex_session_id"], "s-new", "{current:?}");
-            assert_eq!(report["tabs"][0]["label"], "main");
-            assert!(!calls.iter().any(|call| call.starts_with("window\tnew")));
-        }
-    }
-}
-
-#[test]
-fn opens_descendants_as_tabs_in_the_new_rex_session() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "project"]));
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--parent", "project"],
-    ));
-    let rex = FakeRex::new(&fixture.root);
-
-    let output = rex
-        .command(&fixture.root)
-        .args(["attach", "project", "--multiplexer", "rex", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["rex_session_id"], "s-new");
-    assert_eq!(report["descendants"][0]["rex_session_id"], "s-new");
-    assert_eq!(
-        report["descendants"][0]["tabs"][0]["rex_window_id"],
-        "s-new:w-topic"
-    );
-    let calls = rex.calls();
-    assert!(calls.contains(&format!(
-        "window\tnew\t--session\ts-new\ttopic\t--cwd\t{}\t--focus=false\t--json",
-        fixture.workspace("topic").display()
-    )));
-    assert_eq!(
-        calls[calls.len() - 1],
-        "do\tsession.select\tsession_id=s-new\twindow_id=s-new:w-main"
-    );
-}
-
-#[test]
-fn resolves_duplicate_rex_labels_by_working_directory_or_rejects_them() {
-    for rooted in [true, false] {
-        let fixture = WorkspaceFixture::new();
-        assert_success(&forest(&fixture.root, &["create", "topic", "alpha"]));
-        let rex = FakeRex::new(&fixture.root);
-        rex.sessions(serde_json::json!([
-            {"session_id": "s-one", "label": "topic"},
-            {"session_id": "s-two", "label": "topic"}
-        ]));
-        rex.windows("s-one", &[("s-one:w-main", "main", "b-one")]);
-        rex.windows("s-two", &[("s-two:w-main", "main", "b-two")]);
-        rex.cwd("b-one", &fixture.root);
-        if rooted {
-            rex.cwd("b-two", &fixture.workspace("topic").join("alpha"));
-        }
-
-        let output = rex
-            .command(&fixture.root)
-            .args(["attach", "topic", "--multiplexer", "rex", "--json"])
-            .output()
-            .unwrap();
-
-        let calls = rex.calls();
-        if rooted {
-            assert_success(&output);
-            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["rex_session_id"], "s-two");
-            assert_eq!(report["status"], "reused");
-        } else {
-            assert_eq!(output.status.code(), Some(1));
-            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-            let message = error["error"]["message"].as_str().unwrap();
-            assert!(message.contains("s-one, s-two"), "{message}");
-            assert!(!calls.iter().any(|call| call.starts_with("window\tfocus")));
-        }
-        assert!(!calls.iter().any(|call| is_rex_mutation(call)));
-    }
-}
-
-#[test]
-fn warns_when_no_rex_app_can_switch_to_the_session() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "topic"]));
-    let rex = FakeRex::new(&fixture.root);
-    fs::write(rex.state.join("do-fails"), "").unwrap();
-
-    let output = rex
-        .command(&fixture.root)
-        .args(["attach", "topic", "--multiplexer", "rex", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["status"], "created");
-    let warning = report["warnings"][0].as_str().unwrap();
-    assert!(
-        warning.contains("s-new") && warning.contains("no app client is connected"),
-        "{warning}"
-    );
+        .collect::<Vec<_>>();
+    serde_json::json!({"backend": "stub", "workspaces": workspaces, "warnings": []})
 }
 
 fn create_attach_tree(fixture: &WorkspaceFixture) {
@@ -3284,126 +2180,20 @@ fn create_attach_tree(fixture: &WorkspaceFixture) {
 }
 
 #[test]
-fn attaches_a_workspace_and_its_descendants_in_one_herdr_workspace() {
-    let fixture = WorkspaceFixture::new();
-    create_attach_tree(&fixture);
-    let herdr = FakeHerdr::new(&fixture.root);
-
-    let output = herdr
-        .command(&fixture.root)
-        .args(["attach", "project", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["herdr_workspace_id"], "w-new");
-    let descendants = report["descendants"].as_array().unwrap();
-    let names = descendants
-        .iter()
-        .map(|descendant| descendant["workspace"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(names, ["other", "topic", "slot"]);
-    assert!(
-        descendants
-            .iter()
-            .all(|descendant| descendant["herdr_workspace_id"] == "w-new")
-    );
-    let calls = herdr.calls();
-    let created = calls
-        .iter()
-        .filter(|call| call.starts_with("tab\tcreate\t--workspace\tw-new\t"))
-        .collect::<Vec<_>>();
-    assert_eq!(created.len(), 3);
-    for (call, name) in created.iter().zip(["other", "topic", "slot"]) {
-        assert!(
-            call.contains(&format!("\t--cwd\t{}\t", fixture.workspace(name).display())),
-            "{call}"
-        );
-    }
-    for name in ["other", "topic", "slot"] {
-        assert!(calls.iter().any(|call| {
-            call.starts_with("pane\treport-metadata\t")
-                && call.ends_with(&format!(
-                    "git_forest_tab=workspace:{}",
-                    herdr_id(&fixture.workspace(name))
-                ))
-        }));
-    }
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|call| call.contains("\tfocus\t"))
-            .collect::<Vec<_>>(),
-        ["workspace\tfocus\tw-new", "tab\tfocus\tw-new:t-main"]
-    );
-}
-
-#[test]
-fn leaves_an_open_descendant_in_place_and_opens_new_ones_beside_the_root() {
-    let fixture = WorkspaceFixture::new();
-    create_attach_tree(&fixture);
-    let topic = fixture.workspace("topic");
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-other:t-topic", "label": "topic"}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-other:p-topic", "workspace_id": "w-other", "tab_id": "w-other:t-topic", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&topic))}}
-    ]}});
-
-    let herdr = FakeHerdr::new(&fixture.root);
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "project", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let calls = herdr.calls();
-    assert!(!calls.iter().any(|call| {
-        call.starts_with("tab\tcreate") && call.contains(&format!("\t--cwd\t{}\t", topic.display()))
-    }));
-    assert!(calls.iter().any(|call| {
-        call.starts_with("tab\tcreate\t--workspace\tw-new\t")
-            && call.contains(&format!(
-                "\t--cwd\t{}\t",
-                fixture.workspace("slot").display()
-            ))
-    }));
-    assert!(!calls.contains(&"tab\tfocus\tw-other:t-topic".to_owned()));
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let topic_report = report["descendants"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|descendant| descendant["workspace"] == "topic")
-        .unwrap();
-    assert_eq!(topic_report["herdr_workspace_id"], "w-other");
-    assert_eq!(topic_report["status"], "reused");
-}
-
-#[test]
-fn checks_every_descendant_before_contacting_herdr() {
+fn checks_every_descendant_before_running_the_attach_command() {
     let fixture = WorkspaceFixture::new();
     create_attach_tree(&fixture);
     let slot_metadata = fixture.workspace("slot").join(".forest-workspace.toml");
     fs::write(&slot_metadata, "parent = \"topic\"\nsymbol = \"\"\n").unwrap();
-    let herdr = FakeHerdr::new(&fixture.root);
+    let stub = AttachStub::install(&fixture);
 
-    let output = herdr
-        .command(&fixture.root)
-        .args(["attach", "project", "--json"])
-        .output()
-        .unwrap();
+    let output = forest(&fixture.root, &["attach", "project", "--json"]);
 
     assert_eq!(output.status.code(), Some(1));
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
     let message = error["error"]["message"].as_str().unwrap();
     assert!(message.contains(path(&slot_metadata)), "{message}");
-    assert!(!herdr.log.exists());
+    assert!(!stub.ran());
 
     fs::write(&slot_metadata, "parent = \"topic\"\n").unwrap();
     let renamed = fixture.workspace("topic notes");
@@ -3414,71 +2204,14 @@ fn checks_every_descendant_before_contacting_herdr() {
     )
     .unwrap();
 
-    let output = herdr
-        .command(&fixture.root)
-        .args(["attach", "project", "--json"])
-        .output()
-        .unwrap();
+    let output = forest(&fixture.root, &["attach", "project", "--json"]);
 
     assert!(!output.status.success());
-    assert!(!herdr.log.exists());
+    assert!(!stub.ran());
 }
 
 #[test]
-fn rerunning_attach_opens_only_missing_descendants() {
-    let fixture = WorkspaceFixture::new();
-    create_attach_tree(&fixture);
-    let workspaces = serde_json::json!({"result": {"workspaces": [
-        {"workspace_id": "w-root", "tokens": {"git_forest_id": herdr_id(&fixture.workspace("project"))}}
-    ]}});
-    let tabs = serde_json::json!({"result": {"tabs": [
-        {"tab_id": "w-root:t-main", "label": "main"},
-        {"tab_id": "w-root:t-other", "label": "other"}
-    ]}});
-    let panes = serde_json::json!({"result": {"panes": [
-        {"pane_id": "w-root:p-main", "workspace_id": "w-root", "tab_id": "w-root:t-main", "tokens": {"git_forest_tab": "main"}},
-        {"pane_id": "w-root:p-other", "workspace_id": "w-root", "tab_id": "w-root:t-other", "tokens": {"git_forest_tab": format!("workspace:{}", herdr_id(&fixture.workspace("other")))}}
-    ]}});
-    let herdr = FakeHerdr::new(&fixture.root);
-
-    let output = herdr
-        .command(&fixture.root)
-        .env("HERDR_WORKSPACES_RESPONSE", workspaces.to_string())
-        .env("HERDR_TABS_RESPONSE", tabs.to_string())
-        .env("HERDR_PANES_RESPONSE", panes.to_string())
-        .args(["attach", "project", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    let calls = herdr.calls();
-    assert!(
-        !calls
-            .iter()
-            .any(|call| call.starts_with("workspace\tcreate"))
-    );
-    let created = calls
-        .iter()
-        .filter(|call| call.starts_with("tab\tcreate\t--workspace\tw-root\t"))
-        .collect::<Vec<_>>();
-    assert_eq!(created.len(), 2);
-    for (call, name) in created.iter().zip(["topic", "slot"]) {
-        assert!(
-            call.contains(&format!("\t--cwd\t{}\t", fixture.workspace(name).display())),
-            "{call}"
-        );
-    }
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|call| call.contains("\tfocus\t"))
-            .collect::<Vec<_>>(),
-        ["workspace\tfocus\tw-root", "tab\tfocus\tw-root:t-main"]
-    );
-}
-
-#[test]
-fn warns_and_opens_standalone_when_the_saved_parent_is_missing() {
+fn warns_about_a_missing_saved_parent_beside_the_attach_commands_warnings() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(&fixture.root, &["create", "topic"]));
     fs::write(
@@ -3486,51 +2219,39 @@ fn warns_and_opens_standalone_when_the_saved_parent_is_missing() {
         "parent = \"ghost\"\n",
     )
     .unwrap();
+    let stub = AttachStub::install(&fixture);
+    let mut answer = attach_report(&fixture, &["topic"]);
+    answer["warnings"] = serde_json::json!(["could not focus session s1"]);
+    stub.answer(&answer);
+    let missing = "parent workspace \"ghost\" of \"topic\" does not exist; ignoring it";
 
-    for (index, json) in [true, false].into_iter().enumerate() {
-        let herdr_root = fixture.root.join(format!("herdr-{index}"));
-        fs::create_dir(&herdr_root).unwrap();
-        let herdr = FakeHerdr::new(&herdr_root);
-        let mut arguments = vec!["attach", "topic"];
-        if json {
-            arguments.push("--json");
-        }
+    let output = forest(&fixture.root, &["attach", "topic", "--json"]);
 
-        let output = herdr
-            .command(&fixture.root)
-            .env("HERDR_WORKSPACE_ID", "w-current")
-            .args(&arguments)
-            .output()
-            .unwrap();
+    assert_success(&output);
+    let plan = stub.plan();
+    assert_eq!(plan["parent"], Value::Null);
+    assert_eq!(plan["workspaces"][0]["parent"], "ghost");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["parent"], "ghost");
+    assert_eq!(
+        report["warnings"],
+        serde_json::json!([missing, "could not focus session s1"])
+    );
+    assert!(output.stderr.is_empty());
 
-        assert_success(&output);
-        assert!(
-            herdr
-                .calls()
-                .iter()
-                .any(|call| call.starts_with("workspace\tcreate"))
-        );
-        if json {
-            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["parent"], "ghost");
-            assert!(
-                report["warnings"][0]
-                    .as_str()
-                    .unwrap()
-                    .contains("parent workspace \"ghost\" of \"topic\" does not exist")
-            );
-            assert!(output.stderr.is_empty());
-        } else {
-            assert!(
-                String::from_utf8_lossy(&output.stderr)
-                    .contains("warning: parent workspace \"ghost\" of \"topic\" does not exist")
-            );
-        }
-    }
+    let output = forest(&fixture.root, &["attach", "topic"]);
+
+    assert_success(&output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&format!("warning: {missing}")), "{stderr}");
+    assert!(
+        stderr.contains("warning: could not focus session s1"),
+        "{stderr}"
+    );
 }
 
 #[test]
-fn rejects_cyclic_parents_before_contacting_herdr() {
+fn rejects_cyclic_parents_before_running_the_attach_command() {
     let fixture = WorkspaceFixture::new();
     for (workspace, parent) in [("first", "second"), ("second", "first")] {
         assert_success(&forest(&fixture.root, &["create", workspace]));
@@ -3540,13 +2261,9 @@ fn rejects_cyclic_parents_before_contacting_herdr() {
         )
         .unwrap();
     }
-    let herdr = FakeHerdr::new(&fixture.root);
+    let stub = AttachStub::install(&fixture);
 
-    let output = herdr
-        .command(&fixture.root)
-        .args(["attach", "first", "--json"])
-        .output()
-        .unwrap();
+    let output = forest(&fixture.root, &["attach", "first", "--json"]);
 
     assert_eq!(output.status.code(), Some(1));
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
@@ -3556,7 +2273,7 @@ fn rejects_cyclic_parents_before_contacting_herdr() {
             .unwrap()
             .contains("cyclic parents: first -> second -> first")
     );
-    assert!(!herdr.log.exists());
+    assert!(!stub.ran());
 }
 
 #[test]
@@ -3668,14 +2385,10 @@ fn reports_invalid_metadata_in_list_and_refuses_to_attach() {
     assert!(issue.contains(path(&file)), "{issue}");
     assert!(issue.contains("parent must be a string"), "{issue}");
 
-    let herdr = FakeHerdr::new(&fixture.root);
-    let attached = herdr
-        .command(&fixture.root)
-        .args(["attach", "topic", "--json"])
-        .output()
-        .unwrap();
+    let stub = AttachStub::install(&fixture);
+    let attached = forest(&fixture.root, &["attach", "topic", "--json"]);
     assert!(!attached.status.success());
-    assert!(!herdr.log.exists());
+    assert!(!stub.ran());
 }
 
 #[test]
@@ -6141,15 +4854,6 @@ branch = {branch:?}
         ),
     )
     .unwrap();
-}
-
-fn herdr_id(workspace: &Path) -> String {
-    let hash = path(workspace)
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-        });
-    format!("{hash:016x}")
 }
 
 fn workspace_metadata(workspace: &Path) -> toml::Table {

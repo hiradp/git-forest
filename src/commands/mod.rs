@@ -19,9 +19,8 @@ use crate::config::Config;
 use crate::domain::{CommandOutcome, CommandReport};
 use crate::error::Result;
 use crate::git::Git;
-use crate::herdr::Herdr;
 
-pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Result<CommandOutcome> {
+pub fn run(command: &Command, config: &Config, git: &Git) -> Result<CommandOutcome> {
     match command {
         Command::Open | Command::Completions(_) => {
             unreachable!("interactive and completion commands are dispatched by main")
@@ -46,7 +45,7 @@ pub fn run(command: &Command, config: &Config, git: &Git, herdr: &Herdr) -> Resu
         Command::Path(arguments) => path::run(config, &arguments.workspace)
             .map(CommandReport::WorkspacePath)
             .map(CommandOutcome::success),
-        Command::Attach(arguments) => attach::run(config, git, herdr, arguments),
+        Command::Attach(arguments) => attach::run(config, git, arguments),
         Command::Rename(arguments) => rename::run(config, git, arguments),
         Command::Archive(arguments) => archive::run(config, git, arguments),
         Command::Unarchive(arguments) => unarchive::run(config, git, arguments),

@@ -66,7 +66,7 @@ Human output is colored only when standard output is a terminal.
 .B open
 Search, create, and open workspaces interactively.
 Type to fuzzy-search workspaces, then press Enter to attach the selected
-workspace in Herdr or Rex.
+workspace with the configured attach command.
 Press Escape at any prompt to go back or leave without making changes.
 .IP
 The picker lists only workspaces that are not nested under another active
@@ -249,8 +249,8 @@ After later fetches, Forest reports whether a tracking branch is behind but
 never merges, resets, or otherwise updates it.
 .IP
 .BI \-\-symbol " symbol"
-prefixes the Herdr workspace or Rex session name with an emoji or symbol and a
-space, and
+saves an emoji or symbol that the attach command shows beside the workspace
+name, and
 .BI \-\-parent " workspace"
 records an active workspace as this workspace's parent.
 Parents may nest to any depth; a parent that would form a cycle is rejected.
@@ -330,156 +330,58 @@ registration, upstream, and ahead and behind counts.
 Print the absolute path of an existing workspace.
 Human output is exactly the path followed by a newline.
 .TP
-.BI attach " workspace [\-\-multiplexer herdr|rex]"
-Open an existing workspace in a running Herdr or Rex session as a single tab
-with one shell pane rooted in the workspace directory.
-Forest does not start commands in it.
-Forest uses the multiplexer named by
-.BR \-\-multiplexer ,
-then
-.B attach.multiplexer
-in the configuration, then Rex when
-.B REX_SESSION
-is set and
-.B HERDR_WORKSPACE_ID
-is not, and otherwise Herdr.
-The launcher has no flag and uses the remaining rules.
-The following describes Herdr.
-.IP
-The
-.B herdr
-executable must be on
-.BR PATH ,
-and a Herdr server for the current session must already be running.
-Forest never starts or stops the server.
-Where the tab goes depends on where
+.BI attach " workspace"
+Open an existing workspace and its descendants by handing them to the command
+configured as
+.BR attach.command .
+Forest checks the workspaces, writes a JSON plan to the command's standard
+input, and turns the JSON report the command writes to standard output into its
+own report.
+Forest runs no terminal multiplexer itself; where and how the workspaces open
+is up to the command.
+Without
+.BR attach.command ,
 .B attach
-runs:
-.RS
-.IP 1. 3
-If the workspace is already open anywhere, as its own Herdr workspace or as a
-tab, Forest focuses it and never opens a second copy.
-.IP 2. 3
-Otherwise, if the Herdr workspace named by
-.B HERDR_WORKSPACE_ID
-has the workspace's parent open, either as that Herdr workspace or as one of
-its tabs, Forest adds a tab there.
-This applies from any tab in that Herdr workspace.
-A Herdr workspace that lost its Forest tokens still counts as the parent when
-its label names the parent and one of its panes is rooted in the parent's
-directory; Forest tags it again.
-.IP 3. 3
-Otherwise, including outside Herdr, Forest creates a Herdr workspace whose only
-tab is
-.BR main .
-.RE
+fails.
 .IP
-A child tab is labeled with the workspace's symbol, if it has one, and its
-name.
-A workspace opened as its own Herdr workspace is named the same way, and its
-.B main
-tab carries the same symbol.
-Without a symbol, new Herdr workspaces use the plain workspace name and
-existing Herdr names are left alone.
-Each attachment renames a managed tab whose label has drifted.
+The plan names the workspace, then all of its descendants depth-first in name
+order, each with its saved symbol, saved parent, and canonical directory.
+It also names the workspace's nearest existing ancestor, if any, so the command
+can open the workspace beside it.
 .IP
 If a saved parent is not an active workspace, Forest prints a warning and
 ignores it; JSON reports carry it in
-.BR warnings .
-Parents that form a cycle are rejected before Forest contacts Herdr.
-.IP
-Attaching a workspace also opens all of its descendants as tabs in the same
-Herdr workspace, depth-first in name order.
-A descendant that is already open stays where it is, even in another Herdr
-workspace, because Herdr cannot move tabs between workspaces.
-Only the named workspace is focused.
-Forest checks every workspace in the tree before contacting Herdr, so a
+.BR warnings ,
+followed by the command's own warnings.
+Parents that form a cycle are rejected before the command runs.
+Forest checks every workspace in the tree before running the command, so a
 descendant with invalid metadata or inconsistent worktrees blocks attaching its
 ancestors until it is fixed.
-Rerunning after a Herdr failure opens only what is missing.
 .IP
-Forest records a fixed-length identifier derived from the canonical workspace
-path in Herdr's runtime metadata: on the Herdr workspace for a workspace opened
-on its own, and on the tab's pane for a child tab.
-Herdr truncates metadata values to 80 bytes, so Forest does not store the path
-itself.
-Herdr workspaces tagged with the full path by earlier versions are still
-recognized when the path fit, and Forest adds the identifier the first time it
-sees one.
-Tabs and panes Forest did not create keep their positions.
-Herdr workspaces created by earlier versions with one tab per checkout are
-reused; their checkout tabs are left open and are no longer managed.
-Multiple matches are rejected rather than guessed.
+The command runs directly, without a shell, and its standard error reaches the
+terminal unchanged.
+.B attach
+fails when the command exits with a non-zero status, or when its report is not
+the expected JSON or does not answer the plan workspace for workspace.
+The plan and the report are documented in
+.BR docs/json.md .
 .IP
 Attachment does not create worktrees or otherwise change Git state.
 A workspace with inconsistent configured worktrees or invalid metadata is
 rejected.
-Removing a Forest workspace does not close its Herdr workspace, tabs, or
-processes.
+Removing a Forest workspace does not close anything the attach command opened.
 .IP
-Human output summarizes the attached tab:
+Human output summarizes the attached tabs, labeling the session with the
+backend the command reports:
 .IP
 .EX
 Workspace  logical-slots
 Path       /project/src/.workspaces/logical-slots
 Parent     q4-storage
-Herdr      w1
+Rex        s1
 
   ✓ 🌲 logical-slots  created  /project/src/.workspaces/logical-slots
 .EE
-.IP
-In Rex, a session takes the place of a Herdr workspace, a window, which Rex
-shows as a tab, takes the place of a tab, and
-.B REX_SESSION
-names the session
-.B attach
-runs in.
-The same placement rules apply, and Rex cannot move a tab between sessions
-either.
-The
-.B rex
-executable must be on
-.B PATH
-and a Rex server must already be running.
-Forest passes
-.B \-\-autostart=false
-to every Rex command, so it never starts the server, and it never stops it.
-.IP
-Rex has no runtime metadata, so Forest identifies what is open by label alone:
-.RS
-.IP \(bu 2
-A session whose label is the workspace's name, with or without a symbol, is
-that workspace opened on its own.
-Its tab labeled
-.BR main ,
-with or without a symbol, is the managed tab, and Forest adds one if none has
-that label.
-.IP \(bu 2
-A tab with such a label in any other session is that workspace opened as a
-child tab.
-.IP \(bu 2
-When more than one session or tab matches, Forest keeps those with a pane whose
-foreground process is working inside the workspace directory.
-Anything other than exactly one is rejected.
-.RE
-.IP
-Renaming a managed session or tab in Rex therefore makes the next
-.B attach
-open a second copy.
-A session or tab that merely shares a workspace's name is treated as that
-workspace, and workspaces with the same name under different workspace roots
-are told apart only by working directory.
-A saved symbol is reconciled as in Herdr: Forest renames the session, its
-.B main
-tab, and a child tab whose label has drifted.
-.IP
-New Rex terminals run the login shell unless
-.B attach.rex_command
-names another program.
-After attaching, Forest focuses the tab and asks the Rex app to show the
-session.
-Rex can do that only when exactly one app is connected; otherwise the
-workspace stays open in the background and Forest reports a warning.
 .TP
 .BI rename " workspace new-workspace"
 Rename an active workspace without changing its branches, commits, upstreams,
@@ -512,9 +414,9 @@ Before moving anything, rename updates
 .B parent
 in each active child, restoring it if the directory move fails.
 A resumed rename updates any children that still name the old workspace.
-Forest does not update Herdr runtime metadata or Rex labels, so a later
+Forest does not tell the attach command about the rename, so a later
 .B attach
-under the new name may create a new Herdr workspace or Rex session.
+under the new name may open the workspace a second time.
 .TP
 .BI archive " workspace [\-\-force]"
 Remove every clean registered worktree in a workspace with
@@ -557,7 +459,7 @@ workspace completion, and
 use
 .B list \-\-archived
 to see them.
-Forest does not close matching Herdr or Rex processes.
+Forest does not close anything the attach command opened.
 The archive is local dormant storage, not a compressed archive or backup.
 .TP
 .BI unarchive " workspace [checkout ...] [\-\-archive ID] [\-\-as workspace]"
@@ -741,7 +643,7 @@ Completion honors normal configuration discovery,
 .BR FOREST_CONFIG ,
 and
 .BR \-\-config .
-It never contacts remotes, mutates worktrees, or invokes Herdr or Rex.
+It never contacts remotes, mutates worktrees, or runs the attach command.
 Invalid or missing configuration produces no configuration-dependent
 candidates.
 .SH CONFIGURATION
@@ -765,8 +667,7 @@ root = "src/.workspaces"
 branch = "user/{checkout}"
 
 [attach]
-multiplexer = "rex"
-rex_command = ["/opt/homebrew/bin/fish"]
+command = ["desk", "attach", "\-\-plan", "\-"]
 .EE
 .PP
 The file is the one named by
@@ -809,18 +710,16 @@ is the workspace name.
 .B {checkout}
 is the slot of a named checkout and the workspace name for a primary checkout.
 .TP
-.B attach.multiplexer
-Either
-.B herdr
-or
-.BR rex .
-The
+.B attach.command
+The program, then its arguments, that
+.B attach
+runs to open workspaces.
+It is required by
+.B attach
+and the launcher; the
 .B [attach]
-table is optional.
-.TP
-.B attach.rex_command
-The program and arguments each terminal Forest opens in Rex runs instead of the
-login shell.
+table is otherwise optional.
+The program must not be empty.
 .PP
 Unknown placeholders, duplicate members, absolute roots, and unsupported
 configuration versions are rejected.
@@ -841,21 +740,15 @@ It has lower precedence than
 Disable colored human-readable output, including in the launcher.
 .TP
 .B PATH
-Used to find Git and, for
-.BR attach ,
-the Herdr or Rex executable.
-.TP
-.BR HERDR_WORKSPACE_ID ", " REX_SESSION
-Set by Herdr and Rex in their terminals.
-.B attach
-reads them to find the Herdr workspace or Rex session it runs in.
+Used to find Git and the program named by
+.BR attach.command .
 .SH EXIT STATUS
 .TP
 .B 0
 Success, including fully idempotent operations.
 .TP
 .B 1
-An operational conflict or a Git, Herdr, Rex, or filesystem failure.
+An operational conflict or a Git, attach command, or filesystem failure.
 .TP
 .B 2
 A usage, input, or configuration error.

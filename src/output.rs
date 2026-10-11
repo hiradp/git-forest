@@ -743,13 +743,8 @@ fn render_workspace_attach(
     if let Some(parent) = &report.parent {
         render_header_field(writer, "Parent", parent, "", styles)?;
     }
-    render_header_field(
-        writer,
-        report.multiplexer.title(),
-        report.host_id(),
-        styles.cyan(),
-        styles,
-    )?;
+    let backend = backend_title(&report.backend);
+    render_header_field(writer, &backend, &report.session_id, styles.cyan(), styles)?;
     writeln!(writer).map_err(AppError::WriteOutput)?;
 
     let rows = report
@@ -757,8 +752,8 @@ fn render_workspace_attach(
         .iter()
         .map(|tab| (tab, None))
         .chain(report.descendants.iter().flat_map(|descendant| {
-            let elsewhere =
-                (descendant.host_id() != report.host_id()).then(|| descendant.host_id());
+            let elsewhere = (descendant.session_id != report.session_id)
+                .then_some(descendant.session_id.as_str());
             descendant.tabs.iter().map(move |tab| (tab, elsewhere))
         }))
         .collect::<Vec<_>>();
@@ -787,12 +782,11 @@ fn render_workspace_attach(
             tab.path.display(),
         )
         .map_err(AppError::WriteOutput)?;
-        if let Some(host_id) = elsewhere {
+        if let Some(session_id) = elsewhere {
             write!(
                 writer,
-                "  {}({} {host_id}){}",
+                "  {}({backend} {session_id}){}",
                 styles.dim(),
-                report.multiplexer.title(),
                 styles.reset()
             )
             .map_err(AppError::WriteOutput)?;
@@ -800,6 +794,15 @@ fn render_workspace_attach(
         writeln!(writer).map_err(AppError::WriteOutput)?;
     }
     Ok(())
+}
+
+/// The attach command's backend name, capitalized as a field label.
+fn backend_title(backend: &str) -> String {
+    let mut characters = backend.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => String::new(),
+    }
 }
 
 fn render_workspace_rename(
@@ -1341,7 +1344,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::Multiplexer;
     use crate::domain::{AttachedTabReport, RepositoryChangeReport};
 
     #[test]
@@ -1349,17 +1351,15 @@ mod tests {
         let tab = |label: &str, path: &str, id: &str, status| AttachedTabReport {
             label: label.to_owned(),
             path: PathBuf::from(path),
-            herdr_tab_id: Some(id.to_owned()),
-            rex_window_id: None,
+            tab_id: id.to_owned(),
             status,
         };
-        let descendant = |name: &str, herdr: &str, tab| WorkspaceAttachReport {
+        let descendant = |name: &str, session: &str, tab| WorkspaceAttachReport {
             workspace: name.to_owned(),
             path: PathBuf::from(format!("/workspaces/{name}")),
             parent: Some("project".to_owned()),
-            multiplexer: Multiplexer::Herdr,
-            herdr_workspace_id: Some(herdr.to_owned()),
-            rex_session_id: None,
+            backend: "mux".to_owned(),
+            session_id: session.to_owned(),
             status: AttachStatus::Created,
             tabs: vec![tab],
             warnings: Vec::new(),
@@ -1369,9 +1369,8 @@ mod tests {
             workspace: "project".to_owned(),
             path: PathBuf::from("/workspaces/project"),
             parent: None,
-            multiplexer: Multiplexer::Herdr,
-            herdr_workspace_id: Some("w1".to_owned()),
-            rex_session_id: None,
+            backend: "mux".to_owned(),
+            session_id: "w1".to_owned(),
             status: AttachStatus::Created,
             tabs: vec![tab(
                 "main",
@@ -1402,11 +1401,11 @@ mod tests {
             concat!(
                 "Workspace  project\n",
                 "Path       /workspaces/project\n",
-                "Herdr      w1\n",
+                "Mux        w1\n",
                 "\n",
                 "  ✓ main   created  /workspaces/project\n",
                 "  ✓ topic  created  /workspaces/topic\n",
-                "  ✓ main   reused   /workspaces/other  (Herdr w2)\n",
+                "  ✓ main   reused   /workspaces/other  (Mux w2)\n",
             )
         );
     }

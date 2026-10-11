@@ -5,8 +5,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
-use clap::ValueEnum;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::error::{AppError, Result};
 
@@ -18,28 +17,10 @@ pub struct Config {
     pub workspaces_root: PathBuf,
     pub repositories: Vec<RepositoryConfig>,
     pub config_dir: PathBuf,
-    /// The configured terminal multiplexer for `attach`, if any.
-    pub multiplexer: Option<Multiplexer>,
-    /// The program and arguments each new Rex terminal runs instead of the
-    /// login shell.
-    pub rex_command: Vec<String>,
+    /// The program and arguments `attach` pipes its plan to; empty when not
+    /// configured.
+    pub attach_command: Vec<String>,
     branch_template: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum Multiplexer {
-    Herdr,
-    Rex,
-}
-
-impl Multiplexer {
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Herdr => "Herdr",
-            Self::Rex => "Rex",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -125,9 +106,8 @@ struct RawWorkspaces {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAttach {
-    multiplexer: Option<Multiplexer>,
     #[serde(default)]
-    rex_command: Vec<String>,
+    command: Vec<String>,
 }
 
 impl Config {
@@ -176,9 +156,9 @@ impl Config {
             ));
         }
 
-        if raw.attach.rex_command.first().is_some_and(String::is_empty) {
+        if raw.attach.command.first().is_some_and(String::is_empty) {
             return Err(AppError::InvalidConfig(
-                "attach.rex_command must start with a program".to_owned(),
+                "attach.command must start with a program".to_owned(),
             ));
         }
 
@@ -219,8 +199,7 @@ impl Config {
             workspaces_root,
             repositories,
             config_dir: project_root,
-            multiplexer: raw.attach.multiplexer,
-            rex_command: raw.attach.rex_command,
+            attach_command: raw.attach.command,
             branch_template: raw.workspaces.branch,
         })
     }
