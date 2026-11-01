@@ -3,13 +3,12 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::domain::{
-    ArchiveStatus, AttachStatus, ChangeAction, ChangeStatus, CleanStatus, CommandReport,
-    DeleteStatus, FetchStatus, RemovalStatus, RenameStatus, RepositoriesFetchReport,
-    RepositoriesReport, RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval,
-    SetupStatus, UnarchiveStatus, UpdateStatus, WorkspaceArchiveReport, WorkspaceAttachReport,
-    WorkspaceChangeReport, WorkspaceDeleteReport, WorkspaceListEntry, WorkspaceRemovalReport,
-    WorkspaceRenameReport, WorkspaceRenameStatus, WorkspaceStatusEntry, WorkspaceUnarchiveReport,
-    WorktreesCleanReport,
+    ArchiveStatus, ChangeAction, ChangeStatus, CleanStatus, CommandReport, DeleteStatus,
+    FetchStatus, RemovalStatus, RenameStatus, RepositoriesFetchReport, RepositoriesReport,
+    RepositoriesSetupReport, RepositoriesUpdateReport, RepositoryRemoval, SetupStatus,
+    UnarchiveStatus, UpdateStatus, WorkspaceArchiveReport, WorkspaceChangeReport,
+    WorkspaceDeleteReport, WorkspaceListEntry, WorkspaceRemovalReport, WorkspaceRenameReport,
+    WorkspaceRenameStatus, WorkspaceStatusEntry, WorkspaceUnarchiveReport, WorktreesCleanReport,
 };
 use crate::error::{AppError, Result};
 
@@ -33,12 +32,6 @@ impl Styles {
     fn stdout() -> Self {
         Self {
             enabled: io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
-        }
-    }
-
-    fn stderr() -> Self {
-        Self {
-            enabled: io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
         }
     }
 
@@ -102,30 +95,6 @@ pub fn render_error_message(message: &str, exit_code: u8) -> Result<()> {
     writeln!(writer).map_err(AppError::WriteOutput)
 }
 
-fn render_warnings(warnings: &[String]) -> Result<()> {
-    if warnings.is_empty() {
-        return Ok(());
-    }
-    let styles = Styles::stderr();
-    let stderr = io::stderr();
-    let mut writer = stderr.lock();
-    for warning in warnings {
-        writeln!(
-            writer,
-            "{}warning:{} {warning}",
-            styles.yellow(),
-            styles.reset()
-        )
-        .map_err(AppError::WriteOutput)?;
-    }
-    Ok(())
-}
-
-pub fn render_blank_line() -> Result<()> {
-    let stdout = io::stdout();
-    writeln!(stdout.lock()).map_err(AppError::WriteOutput)
-}
-
 pub fn render(report: &CommandReport, json: bool) -> Result<()> {
     let stdout = io::stdout();
     let styles = Styles::stdout();
@@ -143,7 +112,6 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
             CommandReport::WorkspaceUnarchive(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacesStatus(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspacePath(report) => render_json(&mut writer, report)?,
-            CommandReport::WorkspaceAttach(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceRename(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceArchive(report) => render_json(&mut writer, report)?,
             CommandReport::WorkspaceDelete(report) => render_json(&mut writer, report)?,
@@ -227,10 +195,6 @@ pub fn render(report: &CommandReport, json: bool) -> Result<()> {
         }
         CommandReport::WorkspacePath(report) => {
             writeln!(writer, "{}", report.path.display()).map_err(AppError::WriteOutput)
-        }
-        CommandReport::WorkspaceAttach(report) => {
-            render_warnings(&report.warnings)?;
-            render_workspace_attach(&mut writer, report, styles)
         }
         CommandReport::WorkspaceRename(report) => {
             render_workspace_rename(&mut writer, report, styles)
@@ -725,84 +689,6 @@ fn render_workspace_entries(
         writeln!(writer, "  {}", entry.display()).map_err(AppError::WriteOutput)?;
     }
     Ok(())
-}
-
-fn render_workspace_attach(
-    writer: &mut impl Write,
-    report: &WorkspaceAttachReport,
-    styles: Styles,
-) -> Result<()> {
-    render_header_field(
-        writer,
-        "Workspace",
-        &report.workspace,
-        styles.bold(),
-        styles,
-    )?;
-    render_header_field(writer, "Path", report.path.display(), "", styles)?;
-    if let Some(parent) = &report.parent {
-        render_header_field(writer, "Parent", parent, "", styles)?;
-    }
-    let backend = backend_title(&report.backend);
-    render_header_field(writer, &backend, &report.session_id, styles.cyan(), styles)?;
-    writeln!(writer).map_err(AppError::WriteOutput)?;
-
-    let rows = report
-        .tabs
-        .iter()
-        .map(|tab| (tab, None))
-        .chain(report.descendants.iter().flat_map(|descendant| {
-            let elsewhere = (descendant.session_id != report.session_id)
-                .then_some(descendant.session_id.as_str());
-            descendant.tabs.iter().map(move |tab| (tab, elsewhere))
-        }))
-        .collect::<Vec<_>>();
-    let label_width = rows
-        .iter()
-        .map(|(tab, _)| tab.label.chars().count())
-        .max()
-        .unwrap_or(0);
-    let status_width = rows
-        .iter()
-        .map(|(tab, _)| attach_status_name(tab.status).chars().count())
-        .max()
-        .unwrap_or(0);
-    for (tab, elsewhere) in rows {
-        let status = attach_status_name(tab.status);
-        write!(
-            writer,
-            "  {}✓{} {}{:label_width$}{}  {}{status:<status_width$}{}  {}",
-            styles.green(),
-            styles.reset(),
-            styles.bold(),
-            tab.label,
-            styles.reset(),
-            styles.green(),
-            styles.reset(),
-            tab.path.display(),
-        )
-        .map_err(AppError::WriteOutput)?;
-        if let Some(session_id) = elsewhere {
-            write!(
-                writer,
-                "  {}({backend} {session_id}){}",
-                styles.dim(),
-                styles.reset()
-            )
-            .map_err(AppError::WriteOutput)?;
-        }
-        writeln!(writer).map_err(AppError::WriteOutput)?;
-    }
-    Ok(())
-}
-
-/// The attach command's backend name, capitalized as a field label.
-fn backend_title(backend: &str) -> String {
-    let mut characters = backend.chars();
-    match characters.next() {
-        Some(first) => first.to_uppercase().chain(characters).collect(),
-        None => String::new(),
-    }
 }
 
 fn render_workspace_rename(
@@ -1313,14 +1199,6 @@ fn change_status_style(status: ChangeStatus, styles: Styles) -> (&'static str, &
     }
 }
 
-fn attach_status_name(status: AttachStatus) -> &'static str {
-    match status {
-        AttachStatus::Created => "created",
-        AttachStatus::Reused => "reused",
-        AttachStatus::Reconciled => "reconciled",
-    }
-}
-
 fn removal_status_name(status: RemovalStatus) -> &'static str {
     match status {
         RemovalStatus::Removed => "removed",
@@ -1344,71 +1222,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::{AttachedTabReport, RepositoryChangeReport};
-
-    #[test]
-    fn renders_workspace_attachment_as_a_compact_summary() {
-        let tab = |label: &str, path: &str, id: &str, status| AttachedTabReport {
-            label: label.to_owned(),
-            path: PathBuf::from(path),
-            tab_id: id.to_owned(),
-            status,
-        };
-        let descendant = |name: &str, session: &str, tab| WorkspaceAttachReport {
-            workspace: name.to_owned(),
-            path: PathBuf::from(format!("/workspaces/{name}")),
-            parent: Some("project".to_owned()),
-            backend: "mux".to_owned(),
-            session_id: session.to_owned(),
-            status: AttachStatus::Created,
-            tabs: vec![tab],
-            warnings: Vec::new(),
-            descendants: Vec::new(),
-        };
-        let report = WorkspaceAttachReport {
-            workspace: "project".to_owned(),
-            path: PathBuf::from("/workspaces/project"),
-            parent: None,
-            backend: "mux".to_owned(),
-            session_id: "w1".to_owned(),
-            status: AttachStatus::Created,
-            tabs: vec![tab(
-                "main",
-                "/workspaces/project",
-                "w1:t1",
-                AttachStatus::Created,
-            )],
-            warnings: Vec::new(),
-            descendants: vec![
-                descendant(
-                    "topic",
-                    "w1",
-                    tab("topic", "/workspaces/topic", "w1:t2", AttachStatus::Created),
-                ),
-                descendant(
-                    "other",
-                    "w2",
-                    tab("main", "/workspaces/other", "w2:t1", AttachStatus::Reused),
-                ),
-            ],
-        };
-        let mut output = Vec::new();
-
-        render_workspace_attach(&mut output, &report, Styles { enabled: false }).unwrap();
-
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            concat!(
-                "Workspace  project\n",
-                "Path       /workspaces/project\n",
-                "Mux        w1\n",
-                "\n",
-                "  ✓ main   created  /workspaces/project\n",
-                "  ✓ topic  created  /workspaces/topic\n",
-                "  ✓ main   reused   /workspaces/other  (Mux w2)\n",
-            )
-        );
-    }
+    use crate::domain::RepositoryChangeReport;
 
     #[test]
     fn renders_workspaces_as_a_tree_of_symbols_and_names() {

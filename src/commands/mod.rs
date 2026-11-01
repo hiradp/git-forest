@@ -1,5 +1,4 @@
 mod archive;
-mod attach;
 mod clean;
 mod create;
 mod delete;
@@ -22,9 +21,7 @@ use crate::git::Git;
 
 pub fn run(command: &Command, config: &Config, git: &Git) -> Result<CommandOutcome> {
     match command {
-        Command::Open | Command::Completions(_) => {
-            unreachable!("interactive and completion commands are dispatched by main")
-        }
+        Command::Completions(_) => unreachable!("completion commands are dispatched by main"),
         Command::Setup(_) => setup::run(config, git),
         Command::Repos(_) => repos::run(config, git)
             .map(CommandReport::Repositories)
@@ -45,7 +42,6 @@ pub fn run(command: &Command, config: &Config, git: &Git) -> Result<CommandOutco
         Command::Path(arguments) => path::run(config, &arguments.workspace)
             .map(CommandReport::WorkspacePath)
             .map(CommandOutcome::success),
-        Command::Attach(arguments) => attach::run(config, git, arguments),
         Command::Rename(arguments) => rename::run(config, git, arguments),
         Command::Archive(arguments) => archive::run(config, git, arguments),
         Command::Unarchive(arguments) => unarchive::run(config, git, arguments),

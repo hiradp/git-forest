@@ -131,14 +131,6 @@ pub fn prepare_metadata(
     Ok(())
 }
 
-pub fn read_metadata(workspace: &Path) -> Result<WorkspaceMetadata> {
-    let (metadata, errors) = read_metadata_fields(workspace)?;
-    match errors.into_iter().next() {
-        Some(error) => Err(error),
-        None => Ok(metadata),
-    }
-}
-
 /// The readable saved parent, ignoring errors in other fields.
 pub fn saved_parent(workspace: &Path) -> Option<String> {
     read_metadata_fields(workspace).ok()?.0.parent

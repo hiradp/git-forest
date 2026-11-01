@@ -6,17 +6,16 @@ mod config;
 mod domain;
 mod error;
 mod git;
-mod launcher;
 mod output;
 mod workspace;
 
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 
-use crate::cli::{ArchiveArgs, AttachArgs, Cli, Command, CreateArgs, DeleteArgs, OutputArgs};
+use crate::cli::{Cli, Command};
 use crate::config::Config;
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use crate::git::Git;
 
 fn main() -> ExitCode {
@@ -35,19 +34,10 @@ fn main() -> ExitCode {
             return ExitCode::from(exit_code);
         }
     };
-    if cli.command.is_none() && !launcher::is_interactive_terminal() {
-        let mut command = Cli::command();
-        if let Err(error) = command.print_help() {
-            eprintln!("error: could not write help: {error}");
-            return ExitCode::from(1);
-        }
-        return ExitCode::from(2);
-    }
-
     match run(&cli) {
         Ok(exit_code) => ExitCode::from(exit_code),
         Err(error) => {
-            if cli.json() {
+            if cli.command.json() {
                 if output::render_error(&error).is_err() {
                     return ExitCode::from(error.exit_code());
                 }
@@ -60,128 +50,13 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<u8> {
-    if let Some(Command::Completions(arguments)) = cli.command.as_ref() {
+    if let Command::Completions(arguments) = &cli.command {
         completion::write_registration(arguments.shell)?;
         return Ok(0);
     }
 
-    let interactive = cli.command.is_none() || matches!(cli.command, Some(Command::Open));
-    if interactive && !launcher::is_interactive_terminal() {
-        return Err(AppError::InvalidInput(
-            "the workspace launcher requires an interactive terminal".to_owned(),
-        ));
-    }
-
     let config = Config::load(cli.config.as_deref())?;
-    match cli.command.as_ref() {
-        None | Some(Command::Open) => run_launcher(&config),
-        Some(command) => execute(command, &config),
-    }
-}
-
-fn run_launcher(config: &Config) -> Result<u8> {
-    match launcher::prompt(config, &Git)? {
-        launcher::Outcome::Cancelled => Ok(0),
-        launcher::Outcome::Interrupted => Ok(130),
-        launcher::Outcome::Action(launcher::Action::Attach { workspace, issue }) => {
-            if let Some(issue) = issue {
-                return Err(AppError::Operational(format!(
-                    "workspace {workspace:?} needs attention before it can be opened: {issue}; run `git forest list` for details"
-                )));
-            }
-            execute(
-                &Command::Attach(AttachArgs {
-                    workspace,
-                    output: OutputArgs { json: false },
-                }),
-                config,
-            )
-        }
-        launcher::Outcome::Action(launcher::Action::Create {
-            workspace,
-            checkouts,
-        }) => {
-            let created = execute(
-                &Command::Create(CreateArgs {
-                    workspace: workspace.clone(),
-                    symbol: None,
-                    parent: None,
-                    checkouts,
-                    bases: Vec::new(),
-                    branches: Vec::new(),
-                    output: OutputArgs { json: false },
-                }),
-                config,
-            )?;
-            if created != 0 {
-                return Ok(created);
-            }
-
-            output::render_blank_line()?;
-            execute(
-                &Command::Attach(AttachArgs {
-                    workspace: workspace.clone(),
-                    output: OutputArgs { json: false },
-                }),
-                config,
-            )
-            .map_err(|error| {
-                AppError::Operational(format!(
-                    "workspace {workspace:?} was created, but it could not be opened: {error}; retry with `git forest attach {workspace}`"
-                ))
-            })
-        }
-        launcher::Outcome::Action(launcher::Action::Archive { workspaces, force }) => execute_many(
-            config,
-            descendants_first(config, workspaces)?,
-            |workspace| {
-                Command::Archive(ArchiveArgs {
-                    workspace,
-                    force,
-                    output: OutputArgs { json: false },
-                })
-            },
-        ),
-        launcher::Outcome::Action(launcher::Action::Delete { workspaces, force }) => execute_many(
-            config,
-            descendants_first(config, workspaces)?,
-            |workspace| {
-                Command::Delete(DeleteArgs {
-                    workspace,
-                    force,
-                    output: OutputArgs { json: false },
-                })
-            },
-        ),
-    }
-}
-
-/// Retirement refuses workspaces with active children, so a selection that
-/// includes a parent and its children must retire the children first.
-fn descendants_first(config: &Config, mut workspaces: Vec<String>) -> Result<Vec<String>> {
-    let states = workspace::scan(config, &Git)?;
-    let depth = |name: &str| match workspace::ancestry(&states, name) {
-        workspace::Ancestry::Linked(ancestors)
-        | workspace::Ancestry::MissingParent { ancestors, .. } => ancestors.len(),
-        workspace::Ancestry::Cycle(_) => 0,
-    };
-    workspaces.sort_by_cached_key(|name| std::cmp::Reverse(depth(name)));
-    Ok(workspaces)
-}
-
-fn execute_many(
-    config: &Config,
-    workspaces: Vec<String>,
-    command: impl Fn(String) -> Command,
-) -> Result<u8> {
-    let mut exit_code = 0;
-    for (index, workspace) in workspaces.into_iter().enumerate() {
-        if index > 0 {
-            output::render_blank_line()?;
-        }
-        exit_code = exit_code.max(execute(&command(workspace), config)?);
-    }
-    Ok(exit_code)
+    execute(&cli.command, &config)
 }
 
 fn execute(command: &Command, config: &Config) -> Result<u8> {

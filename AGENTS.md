@@ -12,9 +12,6 @@ configured canonical repositories.
 - Clear inherited repository-routing Git environment variables before nested
   Git commands.
 - Do not add implicit `fetch`, `pull`, clone, or other network operations.
-- Never invoke a terminal multiplexer. `attach` finishes its preflight, then
-  runs only the configured `attach.command`, as an argument array with the plan
-  on standard input.
 - Creation must preflight every requested repository before mutation and remain
   safe to rerun after partial execution.
 - Removal must use `git worktree remove`, preserve branches, and reject
@@ -34,8 +31,7 @@ configured canonical repositories.
 - `src/workspace.rs`: reconciliation of filesystem and Git worktree state.
 - `src/domain.rs`: serializable reports.
 - `src/output.rs`: human and JSON rendering.
-- `src/commands/`: command behavior. `attach.rs` holds the attach preflight,
-  the plan it pipes to `attach.command`, and the report it reads back.
+- `src/commands/`: command behavior.
 - `tests/cli.rs`: temporary-repository integration coverage.
 
 Command implementations should inspect state and return typed reports rather

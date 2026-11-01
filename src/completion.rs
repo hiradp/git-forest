@@ -253,8 +253,7 @@ impl CompletionLine {
             }
             return matches!(
                 argument,
-                "open"
-                    | "setup"
+                "setup"
                     | "repos"
                     | "fetch"
                     | "update"
@@ -263,7 +262,6 @@ impl CompletionLine {
                     | "list"
                     | "status"
                     | "path"
-                    | "attach"
                     | "rename"
                     | "archive"
                     | "unarchive"

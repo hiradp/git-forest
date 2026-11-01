@@ -58,9 +58,6 @@ pub enum AppError {
 
     #[error("could not serialize JSON output: {0}")]
     SerializeJson(#[source] serde_json::Error),
-
-    #[error("interactive prompt failed: {0}")]
-    Prompt(#[source] std::io::Error),
 }
 
 impl AppError {

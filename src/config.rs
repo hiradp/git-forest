@@ -17,9 +17,6 @@ pub struct Config {
     pub workspaces_root: PathBuf,
     pub repositories: Vec<RepositoryConfig>,
     pub config_dir: PathBuf,
-    /// The program and arguments `attach` pipes its plan to; empty when not
-    /// configured.
-    pub attach_command: Vec<String>,
     branch_template: String,
 }
 
@@ -84,8 +81,6 @@ struct RawConfig {
     version: u32,
     repositories: RawRepositories,
     workspaces: RawWorkspaces,
-    #[serde(default)]
-    attach: RawAttach,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,13 +96,6 @@ struct RawRepositories {
 struct RawWorkspaces {
     root: PathBuf,
     branch: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawAttach {
-    #[serde(default)]
-    command: Vec<String>,
 }
 
 impl Config {
@@ -156,12 +144,6 @@ impl Config {
             ));
         }
 
-        if raw.attach.command.first().is_some_and(String::is_empty) {
-            return Err(AppError::InvalidConfig(
-                "attach.command must start with a program".to_owned(),
-            ));
-        }
-
         let mut seen = HashSet::new();
         for name in &raw.repositories.members {
             validate_component(name, "repository name")?;
@@ -199,7 +181,6 @@ impl Config {
             workspaces_root,
             repositories,
             config_dir: project_root,
-            attach_command: raw.attach.command,
             branch_template: raw.workspaces.branch,
         })
     }
@@ -433,7 +414,6 @@ mod tests {
                 root: PathBuf::from("src/.workspaces"),
                 branch: "user/{workspace}".to_owned(),
             },
-            attach: RawAttach::default(),
         }
     }
 

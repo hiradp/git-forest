@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct RepositoriesReport {
@@ -228,36 +228,6 @@ pub struct WorkspacePathReport {
 }
 
 #[derive(Debug, Serialize)]
-pub struct WorkspaceAttachReport {
-    pub workspace: String,
-    pub path: PathBuf,
-    pub parent: Option<String>,
-    /// The backend named by the attach command's report.
-    pub backend: String,
-    pub session_id: String,
-    pub status: AttachStatus,
-    pub tabs: Vec<AttachedTabReport>,
-    pub warnings: Vec<String>,
-    pub descendants: Vec<WorkspaceAttachReport>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AttachedTabReport {
-    pub label: String,
-    pub path: PathBuf,
-    pub tab_id: String,
-    pub status: AttachStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachStatus {
-    Created,
-    Reused,
-    Reconciled,
-}
-
-#[derive(Debug, Serialize)]
 pub struct WorkspaceRenameReport {
     pub old_workspace: String,
     pub old_path: PathBuf,
@@ -416,7 +386,6 @@ pub enum CommandReport {
     WorkspaceUnarchive(WorkspaceUnarchiveReport),
     WorkspacesStatus(WorkspacesStatusReport),
     WorkspacePath(WorkspacePathReport),
-    WorkspaceAttach(WorkspaceAttachReport),
     WorkspaceRename(WorkspaceRenameReport),
     WorkspaceArchive(WorkspaceArchiveReport),
     WorkspaceDelete(WorkspaceDeleteReport),

@@ -1,6 +1,6 @@
 # JSON reports
 
-Every non-interactive command accepts `--json`.
+Every command except `completions` accepts `--json`.
 
 Paths are absolute. Optional values are represented as `null` rather than
 omitted.
@@ -196,80 +196,6 @@ before an action could be selected. A branch created to track an explicit
 }
 ```
 
-## Attach
-
-```json
-{
-  "workspace": "logical-slots",
-  "path": "/project/src/.workspaces/logical-slots",
-  "parent": "q4-storage",
-  "backend": "rex",
-  "session_id": "s1",
-  "status": "created",
-  "tabs": [
-    {
-      "label": "🌲 logical-slots",
-      "path": "/project/src/.workspaces/logical-slots",
-      "tab_id": "s1:w2",
-      "status": "created"
-    }
-  ],
-  "warnings": [],
-  "descendants": []
-}
-```
-
-`tabs` always holds the single attached tab. `parent` is the saved parent, or
-`null`. `descendants` lists a report of the same shape for each descendant in
-attach order, and is empty for a workspace without children; each carries its
-own `session_id`. `backend`, `session_id`, `status`, and each tab's `label`,
-`path`, `tab_id`, and `status` come from the attach command's report.
-Workspace and tab status is `created`, `reused`, or `reconciled`. `warnings`
-holds Forest's own warnings followed by the attach command's.
-
-### Attach command
-
-`attach` writes a plan to the standard input of the command configured as
-`attach.command`:
-
-```json
-{
-  "version": 1,
-  "parent": {"name": "q4-storage", "symbol": "🌲", "dir": "/project/src/.workspaces/q4-storage"},
-  "workspaces": [
-    {"name": "logical-slots", "symbol": "🚦", "dir": "/project/src/.workspaces/logical-slots", "parent": "q4-storage"},
-    {"name": "slot-tests", "symbol": null, "dir": "/project/src/.workspaces/slot-tests", "parent": "logical-slots"}
-  ]
-}
-```
-
-`workspaces[0]` is the workspace being attached; the rest are its descendants,
-depth-first in name order. The top-level `parent` is the nearest existing
-ancestor of `workspaces[0]`, or `null`. Each `dir` is a canonical path.
-`symbol` and a workspace's `parent` are its saved metadata and may be `null`.
-
-The command answers on standard output, with one entry per planned workspace in
-the same order:
-
-```json
-{
-  "backend": "rex",
-  "workspaces": [
-    {
-      "name": "logical-slots",
-      "session_id": "s1",
-      "status": "created",
-      "tab": {"label": "🚦 main", "dir": "/project/src/.workspaces/logical-slots", "id": "s1:w1", "status": "created"}
-    }
-  ],
-  "warnings": []
-}
-```
-
-Its standard error reaches the user unchanged. A non-zero exit, or an answer
-that is not this JSON or does not match the plan, fails `attach` with exit
-status 1.
-
 ## Rename
 
 ```json
@@ -440,5 +366,5 @@ for every requested repository.
 ## Exit status
 
 - `0`: successful, including fully idempotent operations;
-- `1`: an operational conflict or Git, attach command, or filesystem failure;
+- `1`: an operational conflict or Git or filesystem failure;
 - `2`: usage, input, or configuration error.

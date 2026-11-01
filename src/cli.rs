@@ -21,20 +21,11 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
-    pub command: Option<Command>,
-}
-
-impl Cli {
-    pub fn json(&self) -> bool {
-        self.command.as_ref().is_some_and(Command::json)
-    }
+    pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Search, create, and open workspaces interactively
-    Open,
-
     /// Ensure configured canonical repositories are cloned
     Setup(OutputArgs),
 
@@ -62,9 +53,6 @@ pub enum Command {
     /// Print a workspace path
     Path(PathArgs),
 
-    /// Open a workspace with the configured attach command
-    Attach(AttachArgs),
-
     /// Rename a workspace without renaming its branches
     Rename(RenameArgs),
 
@@ -90,7 +78,6 @@ pub enum Command {
 impl Command {
     pub fn json(&self) -> bool {
         match self {
-            Self::Open => false,
             Self::Setup(args) | Self::Repos(args) => args.json,
             Self::List(args) => args.output.json,
             Self::Fetch(args) => args.output.json,
@@ -99,7 +86,6 @@ impl Command {
             Self::Add(args) => args.output.json,
             Self::Status(args) => args.output.json,
             Self::Path(args) => args.output.json,
-            Self::Attach(args) => args.output.json,
             Self::Rename(args) => args.output.json,
             Self::Archive(args) => args.output.json,
             Self::Unarchive(args) => args.creation.output.json,
@@ -193,7 +179,7 @@ pub struct CreateArgs {
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 
-    /// Emoji or symbol to prefix the workspace name where it is attached
+    /// Emoji or symbol to show beside the workspace name
     #[arg(long, value_name = "SYMBOL")]
     pub symbol: Option<String>,
 
@@ -305,16 +291,6 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct PathArgs {
-    #[arg(add = ArgValueCompleter::new(completion::workspaces))]
-    pub workspace: String,
-
-    #[command(flatten)]
-    pub output: OutputArgs,
-}
-
-#[derive(Debug, Args)]
-pub struct AttachArgs {
-    /// Workspace name
     #[arg(add = ArgValueCompleter::new(completion::workspaces))]
     pub workspace: String,
 

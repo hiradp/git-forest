@@ -19,79 +19,6 @@ struct WorkspaceFixture {
     root: PathBuf,
 }
 
-/// A stand-in for the configured attach command. It records the plan it reads
-/// and answers with whatever the test prepared.
-struct AttachStub {
-    state: PathBuf,
-}
-
-impl AttachStub {
-    fn install(fixture: &WorkspaceFixture) -> Self {
-        let state = fixture.root.join("attach-stub");
-        fs::create_dir(&state).unwrap();
-        let executable = state.join("attach");
-        fs::write(
-            &executable,
-            r#"#!/bin/sh
-state="$(dirname "$0")"
-if [ -n "${GIT_DIR:-}" ]; then
-  printf 'inherited GIT_DIR\n' >&2
-  exit 1
-fi
-printf '%s\n' "$@" > "$state/arguments"
-cat > "$state/plan.json"
-if [ -f "$state/stderr" ]; then
-  cat "$state/stderr" >&2
-fi
-if [ -f "$state/stdout" ]; then
-  cat "$state/stdout"
-fi
-if [ -f "$state/status" ]; then
-  exit "$(cat "$state/status")"
-fi
-"#,
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&executable).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions).unwrap();
-        configure_attach(
-            fixture,
-            &format!("command = [{:?}, \"--plan\", \"-\"]", path(&executable)),
-        );
-        Self { state }
-    }
-
-    fn answer(&self, report: &Value) {
-        self.answer_text(&report.to_string());
-    }
-
-    fn answer_text(&self, stdout: &str) {
-        fs::write(self.state.join("stdout"), stdout).unwrap();
-    }
-
-    fn fail(&self, status: u8, stderr: &str) {
-        fs::write(self.state.join("status"), status.to_string()).unwrap();
-        fs::write(self.state.join("stderr"), stderr).unwrap();
-    }
-
-    fn ran(&self) -> bool {
-        self.state.join("arguments").exists()
-    }
-
-    fn arguments(&self) -> Vec<String> {
-        fs::read_to_string(self.state.join("arguments"))
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
-    fn plan(&self) -> Value {
-        serde_json::from_slice(&fs::read(self.state.join("plan.json")).unwrap()).unwrap()
-    }
-}
-
 impl WorkspaceFixture {
     fn new() -> Self {
         Self::with_default("main")
@@ -1702,12 +1629,7 @@ fn saves_a_symbol_without_changing_workspace_or_branch_identity() {
 
     assert_success(&forest(&fixture.root, &["create", "topic"]));
     assert_success(&forest(&fixture.root, &["add", "topic", "beta"]));
-    let stub = AttachStub::install(&fixture);
-    stub.answer(&attach_report(&fixture, &["topic"]));
-    let attached = forest(&fixture.root, &["attach", "topic", "--json"]);
-
-    assert_success(&attached);
-    assert_eq!(stub.plan()["workspaces"][0]["symbol"], "🧑🏽‍💻");
+    assert_eq!(listed_symbol(&fixture.root, "topic"), "🧑🏽‍💻");
 }
 
 #[test]
@@ -1756,32 +1678,27 @@ fn rejects_invalid_symbols_before_creating_workspaces() {
 }
 
 #[test]
-fn reads_edited_symbol_files_and_identifies_invalid_ones_before_attachment() {
+fn reads_edited_symbol_files_and_identifies_invalid_ones() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(&fixture.root, &["create", "topic"]));
     let symbol_path = fixture.workspace("topic").join(".forest-symbol");
-    let stub = AttachStub::install(&fixture);
-    stub.answer(&attach_report(&fixture, &["topic"]));
 
     for contents in ["", " \r\n", "🌲 topic\n", "🌲\n🔥", "\u{1b}[31m"] {
         fs::write(&symbol_path, contents).unwrap();
-        let output = forest(&fixture.root, &["attach", "topic", "--json"]);
+        let output = forest(&fixture.root, &["list", "--json"]);
 
-        assert_eq!(output.status.code(), Some(1), "accepted {contents:?}");
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        let message = error["error"]["message"].as_str().unwrap();
-        assert!(message.contains(path(&symbol_path)), "{message}");
-        assert!(message.contains("nonempty"), "{message}");
-        assert!(!message.contains("invalid input"), "{message}");
-        assert!(!stub.ran());
+        assert_success(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let workspace = &report["workspaces"][0];
+        assert_eq!(workspace["symbol"], Value::Null, "accepted {contents:?}");
+        let issue = workspace["inconsistencies"][0].as_str().unwrap();
+        assert!(issue.contains(path(&symbol_path)), "{issue}");
+        assert!(issue.contains("nonempty"), "{issue}");
+        assert!(!issue.contains("invalid input"), "{issue}");
     }
     for contents in ["🌲\r\n", "🌲\n\n", "🌲 \t\n"] {
         fs::write(&symbol_path, contents).unwrap();
-        let output = forest(&fixture.root, &["attach", "topic", "--json"]);
-
-        assert_success(&output);
-        assert_eq!(stub.plan()["workspaces"][0]["symbol"], "🌲", "{contents:?}");
-        fs::remove_file(stub.state.join("plan.json")).unwrap();
+        assert_eq!(listed_symbol(&fixture.root, "topic"), "🌲", "{contents:?}");
     }
 }
 
@@ -1859,10 +1776,6 @@ fn refuses_symbol_symlinks_without_changing_their_targets_or_creating_checkouts(
     assert!(!output.status.success());
     assert_eq!(fs::read_to_string(&target).unwrap(), "keep me\n");
     assert!(!fixture.workspace("topic").join("alpha").exists());
-    let stub = AttachStub::install(&fixture);
-    let attached = forest(&fixture.root, &["attach", "topic", "--json"]);
-    assert!(!attached.status.success());
-    assert!(!stub.ran());
 }
 
 #[test]
@@ -1876,18 +1789,7 @@ fn preserves_symbols_through_rename_archive_and_restore() {
     ] {
         assert_success(&forest(&fixture.root, &arguments));
     }
-    let stub = AttachStub::install(&fixture);
-    stub.answer(&attach_report(&fixture, &["renamed"]));
-    assert_success(&forest(&fixture.root, &["attach", "renamed"]));
-    assert_eq!(
-        stub.plan()["workspaces"][0],
-        serde_json::json!({
-            "name": "renamed",
-            "symbol": "🌲",
-            "dir": path(&fixture.workspace("renamed")),
-            "parent": null
-        })
-    );
+    assert_eq!(listed_symbol(&fixture.root, "renamed"), "🌲");
 
     assert_success(&forest(&fixture.root, &["archive", "renamed"]));
     let archives = fixture.archives();
@@ -1920,360 +1822,6 @@ fn preserves_symbols_through_rename_archive_and_restore() {
         workspace_metadata(&fixture.workspace("renamed"))["symbol"].as_str(),
         Some("🔥")
     );
-}
-
-#[test]
-fn pipes_a_plan_for_the_workspace_and_its_descendants_and_reports_the_answer() {
-    let fixture = WorkspaceFixture::new();
-    for arguments in [
-        vec!["create", "program", "--symbol", "🌲"],
-        vec!["create", "project", "alpha", "--parent", "program"],
-        vec!["create", "topic", "--parent", "project"],
-        vec!["create", "other", "--parent", "project", "--symbol", "🚦"],
-        vec!["create", "zeta", "--parent", "other"],
-    ] {
-        assert_success(&forest(&fixture.root, &arguments));
-    }
-    let names = ["project", "other", "zeta", "topic"];
-    let stub = AttachStub::install(&fixture);
-    let mut answer = attach_report(&fixture, &names);
-    answer["workspaces"][3] = serde_json::json!({
-        "name": "topic",
-        "session_id": "s2",
-        "status": "reconciled",
-        "tab": {"label": "main", "dir": "/elsewhere", "id": "s2:t1", "status": "reused"}
-    });
-    stub.answer(&answer);
-
-    let output = Command::new(binary())
-        .current_dir(&fixture.root)
-        .env_remove("FOREST_CONFIG")
-        .env("GIT_DIR", fixture.root.join("unrelated.git"))
-        .args(["attach", "project", "--json"])
-        .output()
-        .unwrap();
-
-    assert_success(&output);
-    assert_eq!(stub.arguments(), ["--plan", "-"]);
-    let planned = |name: &str, symbol: Value, parent: &str| {
-        serde_json::json!({
-            "name": name,
-            "symbol": symbol,
-            "dir": path(&fixture.workspace(name)),
-            "parent": parent
-        })
-    };
-    assert_eq!(
-        stub.plan(),
-        serde_json::json!({
-            "version": 1,
-            "parent": {
-                "name": "program",
-                "symbol": "🌲",
-                "dir": path(&fixture.workspace("program"))
-            },
-            "workspaces": [
-                planned("project", Value::Null, "program"),
-                planned("other", "🚦".into(), "project"),
-                planned("zeta", Value::Null, "other"),
-                planned("topic", Value::Null, "project"),
-            ]
-        })
-    );
-
-    let created = |name: &str, parent: &str| {
-        serde_json::json!({
-            "workspace": name,
-            "path": path(&fixture.workspace(name)),
-            "parent": parent,
-            "backend": "stub",
-            "session_id": "s1",
-            "status": "created",
-            "tabs": [{
-                "label": name,
-                "path": path(&fixture.workspace(name)),
-                "tab_id": format!("s1:{name}"),
-                "status": "created"
-            }],
-            "warnings": [],
-            "descendants": []
-        })
-    };
-    let mut expected = created("project", "program");
-    expected["descendants"] = serde_json::json!([
-        created("other", "project"),
-        created("zeta", "other"),
-        {
-            "workspace": "topic",
-            "path": path(&fixture.workspace("topic")),
-            "parent": "project",
-            "backend": "stub",
-            "session_id": "s2",
-            "status": "reconciled",
-            "tabs": [{"label": "main", "path": "/elsewhere", "tab_id": "s2:t1", "status": "reused"}],
-            "warnings": [],
-            "descendants": []
-        }
-    ]);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report, expected);
-    assert!(output.stderr.is_empty());
-}
-
-#[test]
-fn plans_a_standalone_workspace_without_a_parent_or_symbol() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "topic", "alpha"]));
-    let stub = AttachStub::install(&fixture);
-    stub.answer(&attach_report(&fixture, &["topic"]));
-    let workspace = fixture.workspace("topic");
-
-    let output = forest(&fixture.root, &["attach", "topic"]);
-
-    assert_success(&output);
-    assert_eq!(
-        stub.plan(),
-        serde_json::json!({
-            "version": 1,
-            "parent": null,
-            "workspaces": [
-                {"name": "topic", "symbol": null, "dir": path(&workspace), "parent": null}
-            ]
-        })
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        format!(
-            concat!(
-                "Workspace  topic\n",
-                "Path       {path}\n",
-                "Stub       s1\n",
-                "\n",
-                "  ✓ topic  created  {path}\n",
-            ),
-            path = workspace.display()
-        )
-    );
-    assert!(output.stderr.is_empty());
-}
-
-#[test]
-fn refuses_to_attach_without_a_usable_attach_command() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "topic"]));
-
-    let output = forest(&fixture.root, &["attach", "topic", "--json"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    let message = error["error"]["message"].as_str().unwrap();
-    assert!(
-        message.contains("attach.command is not configured"),
-        "{message}"
-    );
-
-    configure_attach(&fixture, r#"command = ["", "--plan", "-"]"#);
-
-    let output = forest(&fixture.root, &["attach", "topic", "--json"]);
-
-    assert_eq!(output.status.code(), Some(2));
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    let message = error["error"]["message"].as_str().unwrap();
-    assert!(
-        message.contains("attach.command must start with a program"),
-        "{message}"
-    );
-}
-
-#[test]
-fn reports_a_failing_attach_command_with_its_exit_status() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "topic"]));
-    let stub = AttachStub::install(&fixture);
-    stub.answer(&attach_report(&fixture, &["topic"]));
-    stub.fail(3, "no session is running\n");
-
-    let output = forest(&fixture.root, &["attach", "topic"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("no session is running\n"), "{stderr}");
-    let error = stderr.lines().last().unwrap();
-    assert!(error.starts_with("error: attach command"), "{stderr}");
-    assert!(error.contains(path(&stub.state.join("attach"))), "{stderr}");
-    assert!(error.contains("exit status: 3"), "{stderr}");
-}
-
-#[test]
-fn rejects_an_attach_report_that_does_not_answer_the_plan() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "project"]));
-    assert_success(&forest(
-        &fixture.root,
-        &["create", "topic", "--parent", "project"],
-    ));
-    let stub = AttachStub::install(&fixture);
-    let mut unknown_status = attach_report(&fixture, &["project", "topic"]);
-    unknown_status["workspaces"][1]["status"] = "opened".into();
-
-    for answer in [
-        String::new(),
-        "attached project\n".to_owned(),
-        serde_json::json!({"backend": "stub"}).to_string(),
-        attach_report(&fixture, &["project"]).to_string(),
-        attach_report(&fixture, &["topic", "project"]).to_string(),
-        unknown_status.to_string(),
-    ] {
-        stub.answer_text(&answer);
-
-        let output = forest(&fixture.root, &["attach", "project", "--json"]);
-
-        assert_eq!(output.status.code(), Some(1), "accepted {answer:?}");
-        assert!(output.stdout.is_empty(), "{answer:?}");
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        let message = error["error"]["message"].as_str().unwrap();
-        assert!(
-            message.contains("returned an unexpected report"),
-            "{message}"
-        );
-    }
-}
-
-fn configure_attach(fixture: &WorkspaceFixture, settings: &str) {
-    let config = fixture.root.join(".forest.toml");
-    let contents = fs::read_to_string(&config).unwrap();
-    fs::write(config, format!("{contents}\n[attach]\n{settings}\n")).unwrap();
-}
-
-/// A report that attaches each workspace as a new tab of one session.
-fn attach_report(fixture: &WorkspaceFixture, names: &[&str]) -> Value {
-    let workspaces = names
-        .iter()
-        .map(|name| {
-            serde_json::json!({
-                "name": name,
-                "session_id": "s1",
-                "status": "created",
-                "tab": {
-                    "label": name,
-                    "dir": path(&fixture.workspace(name)),
-                    "id": format!("s1:{name}"),
-                    "status": "created"
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({"backend": "stub", "workspaces": workspaces, "warnings": []})
-}
-
-fn create_attach_tree(fixture: &WorkspaceFixture) {
-    for arguments in [
-        vec!["create", "project"],
-        vec!["create", "topic", "--parent", "project"],
-        vec!["create", "slot", "--parent", "topic"],
-        vec!["create", "other", "--parent", "project"],
-    ] {
-        assert_success(&forest(&fixture.root, &arguments));
-    }
-}
-
-#[test]
-fn checks_every_descendant_before_running_the_attach_command() {
-    let fixture = WorkspaceFixture::new();
-    create_attach_tree(&fixture);
-    let slot_metadata = fixture.workspace("slot").join(".forest-workspace.toml");
-    fs::write(&slot_metadata, "parent = \"topic\"\nsymbol = \"\"\n").unwrap();
-    let stub = AttachStub::install(&fixture);
-
-    let output = forest(&fixture.root, &["attach", "project", "--json"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    let message = error["error"]["message"].as_str().unwrap();
-    assert!(message.contains(path(&slot_metadata)), "{message}");
-    assert!(!stub.ran());
-
-    fs::write(&slot_metadata, "parent = \"topic\"\n").unwrap();
-    let renamed = fixture.workspace("topic notes");
-    fs::create_dir(&renamed).unwrap();
-    fs::write(
-        renamed.join(".forest-workspace.toml"),
-        "parent = \"project\"\n",
-    )
-    .unwrap();
-
-    let output = forest(&fixture.root, &["attach", "project", "--json"]);
-
-    assert!(!output.status.success());
-    assert!(!stub.ran());
-}
-
-#[test]
-fn warns_about_a_missing_saved_parent_beside_the_attach_commands_warnings() {
-    let fixture = WorkspaceFixture::new();
-    assert_success(&forest(&fixture.root, &["create", "topic"]));
-    fs::write(
-        fixture.workspace("topic").join(".forest-workspace.toml"),
-        "parent = \"ghost\"\n",
-    )
-    .unwrap();
-    let stub = AttachStub::install(&fixture);
-    let mut answer = attach_report(&fixture, &["topic"]);
-    answer["warnings"] = serde_json::json!(["could not focus session s1"]);
-    stub.answer(&answer);
-    let missing = "parent workspace \"ghost\" of \"topic\" does not exist; ignoring it";
-
-    let output = forest(&fixture.root, &["attach", "topic", "--json"]);
-
-    assert_success(&output);
-    let plan = stub.plan();
-    assert_eq!(plan["parent"], Value::Null);
-    assert_eq!(plan["workspaces"][0]["parent"], "ghost");
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["parent"], "ghost");
-    assert_eq!(
-        report["warnings"],
-        serde_json::json!([missing, "could not focus session s1"])
-    );
-    assert!(output.stderr.is_empty());
-
-    let output = forest(&fixture.root, &["attach", "topic"]);
-
-    assert_success(&output);
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains(&format!("warning: {missing}")), "{stderr}");
-    assert!(
-        stderr.contains("warning: could not focus session s1"),
-        "{stderr}"
-    );
-}
-
-#[test]
-fn rejects_cyclic_parents_before_running_the_attach_command() {
-    let fixture = WorkspaceFixture::new();
-    for (workspace, parent) in [("first", "second"), ("second", "first")] {
-        assert_success(&forest(&fixture.root, &["create", workspace]));
-        fs::write(
-            fixture.workspace(workspace).join(".forest-workspace.toml"),
-            format!("parent = \"{parent}\"\n"),
-        )
-        .unwrap();
-    }
-    let stub = AttachStub::install(&fixture);
-
-    let output = forest(&fixture.root, &["attach", "first", "--json"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert!(
-        error["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("cyclic parents: first -> second -> first")
-    );
-    assert!(!stub.ran());
 }
 
 #[test]
@@ -2369,7 +1917,7 @@ fn metadata_updates_keep_other_fields_and_convert_legacy_symbols() {
 }
 
 #[test]
-fn reports_invalid_metadata_in_list_and_refuses_to_attach() {
+fn reports_invalid_metadata_in_list() {
     let fixture = WorkspaceFixture::new();
     assert_success(&forest(&fixture.root, &["create", "topic"]));
     let file = fixture.workspace("topic").join(".forest-workspace.toml");
@@ -2384,11 +1932,6 @@ fn reports_invalid_metadata_in_list_and_refuses_to_attach() {
         .unwrap();
     assert!(issue.contains(path(&file)), "{issue}");
     assert!(issue.contains("parent must be a string"), "{issue}");
-
-    let stub = AttachStub::install(&fixture);
-    let attached = forest(&fixture.root, &["attach", "topic", "--json"]);
-    assert!(!attached.status.success());
-    assert!(!stub.ran());
 }
 
 #[test]
@@ -4428,7 +3971,7 @@ fn bash_setup_completes_the_git_style_invocation() {
             "-c",
             r#"
 source "$FOREST_TEST_COMPLETION_SETUP"
-COMP_WORDS=(git forest attach log)
+COMP_WORDS=(git forest path log)
 COMP_CWORD=3
 COMP_TYPE=9
 __git_cmd_idx=1
@@ -4497,12 +4040,12 @@ _git-forest
 }
 
 #[test]
-fn dynamically_completes_workspaces_for_attach() {
+fn dynamically_completes_workspaces_for_path() {
     let fixture = WorkspaceFixture::new();
     fs::create_dir_all(fixture.workspace("logical-slots")).unwrap();
     fs::create_dir_all(fixture.workspace("review-123")).unwrap();
 
-    let candidates = completions(&fixture.root, &["git-forest", "attach", "log"]);
+    let candidates = completions(&fixture.root, &["git-forest", "path", "log"]);
 
     assert!(candidates.contains(&"logical-slots".to_owned()));
     assert!(!candidates.contains(&"review-123".to_owned()));
@@ -4580,7 +4123,7 @@ fn dynamic_completion_honors_an_explicit_config() {
 
     let candidates = completions(
         &outside,
-        &["git-forest", "--config", path(&config), "attach", "log"],
+        &["git-forest", "--config", path(&config), "path", "log"],
     );
 
     assert!(candidates.contains(&"logical-slots".to_owned()));
@@ -4657,7 +4200,7 @@ fn dynamically_completes_stale_registered_worktrees_for_remove() {
 fn missing_configuration_produces_no_dynamic_value_candidates() {
     let temp = tempfile::tempdir().unwrap();
 
-    let candidates = completions(temp.path(), &["git-forest", "attach", "log"]);
+    let candidates = completions(temp.path(), &["git-forest", "path", "log"]);
 
     assert!(
         candidates
@@ -4667,28 +4210,13 @@ fn missing_configuration_produces_no_dynamic_value_candidates() {
 }
 
 #[test]
-fn no_subcommand_prints_help_when_not_attached_to_a_terminal() {
+fn no_subcommand_prints_help() {
     let output = Command::new(binary()).output().unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Usage: git-forest [OPTIONS] [COMMAND]"));
-    assert!(stdout.contains("open"));
-    assert!(output.stderr.is_empty());
-}
-
-#[test]
-fn explicit_launcher_rejects_non_interactive_input() {
-    let fixture = WorkspaceFixture::new();
-    let output = forest(&fixture.root, &["open"]);
-
-    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("workspace launcher requires an interactive terminal")
-    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Usage: git-forest [OPTIONS] <COMMAND>"));
 }
 
 #[test]
@@ -4861,6 +4389,20 @@ fn workspace_metadata(workspace: &Path) -> toml::Table {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+/// The symbol `list --json` reports for a workspace.
+fn listed_symbol(current_dir: &Path, workspace: &str) -> String {
+    let output = forest(current_dir, &["list", "--json"]);
+    assert_success(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entry = report["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == workspace)
+        .unwrap();
+    entry["symbol"].as_str().unwrap().to_owned()
 }
 
 fn forest(current_dir: &Path, arguments: &[&str]) -> Output {

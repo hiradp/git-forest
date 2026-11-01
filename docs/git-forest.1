@@ -4,11 +4,11 @@ git-forest \- manage named workspaces across multiple Git repositories
 .SH SYNOPSIS
 .B git forest
 .RI [ options ]
-.RI [ command ]
+.I command
 .br
 .B git-forest
 .RI [ options ]
-.RI [ command ]
+.I command
 .SH DESCRIPTION
 .B git-forest
 manages one named workspace across multiple configured canonical repositories
@@ -18,12 +18,7 @@ Git exposes the installed executable as both
 and
 .BR "git forest" .
 .PP
-With no command, Forest opens an interactive workspace launcher.
-The
-.B open
-command starts the same launcher explicitly.
-Without an interactive terminal, invoking Forest without a command prints its
-command-line help.
+Without a command, Forest prints its command-line help.
 .PP
 Forest treats Git worktree metadata and the filesystem as authoritative.
 It does not maintain a separate registry, reset or delete branches, start
@@ -54,7 +49,8 @@ This option is global and may be used with any command.
 .TP
 .B \-\-json
 Emit structured JSON.
-This option is available on non-interactive commands.
+This option is available on every command except
+.BR completions .
 Application errors are then emitted as JSON on standard error.
 The report formats are documented in
 .B docs/json.md
@@ -62,43 +58,6 @@ in the git-forest repository.
 .PP
 Human output is colored only when standard output is a terminal.
 .SH COMMANDS
-.TP
-.B open
-Search, create, and open workspaces interactively.
-Type to fuzzy-search workspaces, then press Enter to attach the selected
-workspace with the configured attach command.
-Press Escape at any prompt to go back or leave without making changes.
-.IP
-The picker lists only workspaces that are not nested under another active
-workspace, with a count of the workspaces nested beneath each.
-Opening one opens its descendants too, and searching for a descendant's name
-finds the workspace that contains it.
-A workspace whose saved parent is missing or cyclic is listed on its own.
-.IP
-The picker also offers to create a workspace.
-Forest prompts for a name and presents the configured repositories as a
-searchable multi-select.
-After a successful preflight it creates the linked worktrees and attaches the
-new workspace.
-The launcher creates one primary checkout per selected repository using the
-configured branch template and each repository's local
-.BR origin/HEAD ;
-use
-.B create
-and
-.B add
-for named checkouts or branch and base overrides.
-.IP
-Press Space to select one or more workspaces, then Ctrl-D or Delete to choose
-Archive, Force archive, Delete, or Force delete for the selection.
-With no selection, the action applies to the highlighted workspace.
-The action also covers every workspace nested under the ones chosen, children
-before their parents, and a single confirmation names the full set.
-Archive preserves workspace-local files beneath
-.BR .archive ;
-Delete permanently removes them.
-Non-force actions refuse dirty worktrees, force actions discard dirty worktree
-changes, and every action preserves Git branches.
 .TP
 .B setup
 Ensure configured canonical repositories are cloned.
@@ -249,8 +208,9 @@ After later fetches, Forest reports whether a tracking branch is behind but
 never merges, resets, or otherwise updates it.
 .IP
 .BI \-\-symbol " symbol"
-saves an emoji or symbol that the attach command shows beside the workspace
-name, and
+saves an emoji or symbol that
+.B list
+shows beside the workspace name, and
 .BI \-\-parent " workspace"
 records an active workspace as this workspace's parent.
 Parents may nest to any depth; a parent that would form a cycle is rejected.
@@ -330,59 +290,6 @@ registration, upstream, and ahead and behind counts.
 Print the absolute path of an existing workspace.
 Human output is exactly the path followed by a newline.
 .TP
-.BI attach " workspace"
-Open an existing workspace and its descendants by handing them to the command
-configured as
-.BR attach.command .
-Forest checks the workspaces, writes a JSON plan to the command's standard
-input, and turns the JSON report the command writes to standard output into its
-own report.
-Forest runs no terminal multiplexer itself; where and how the workspaces open
-is up to the command.
-Without
-.BR attach.command ,
-.B attach
-fails.
-.IP
-The plan names the workspace, then all of its descendants depth-first in name
-order, each with its saved symbol, saved parent, and canonical directory.
-It also names the workspace's nearest existing ancestor, if any, so the command
-can open the workspace beside it.
-.IP
-If a saved parent is not an active workspace, Forest prints a warning and
-ignores it; JSON reports carry it in
-.BR warnings ,
-followed by the command's own warnings.
-Parents that form a cycle are rejected before the command runs.
-Forest checks every workspace in the tree before running the command, so a
-descendant with invalid metadata or inconsistent worktrees blocks attaching its
-ancestors until it is fixed.
-.IP
-The command runs directly, without a shell, and its standard error reaches the
-terminal unchanged.
-.B attach
-fails when the command exits with a non-zero status, or when its report is not
-the expected JSON or does not answer the plan workspace for workspace.
-The plan and the report are documented in
-.BR docs/json.md .
-.IP
-Attachment does not create worktrees or otherwise change Git state.
-A workspace with inconsistent configured worktrees or invalid metadata is
-rejected.
-Removing a Forest workspace does not close anything the attach command opened.
-.IP
-Human output summarizes the attached tabs, labeling the session with the
-backend the command reports:
-.IP
-.EX
-Workspace  logical-slots
-Path       /project/src/.workspaces/logical-slots
-Parent     q4-storage
-Rex        s1
-
-  ✓ 🌲 logical-slots  created  /project/src/.workspaces/logical-slots
-.EE
-.TP
 .BI rename " workspace new-workspace"
 Rename an active workspace without changing its branches, commits, upstreams,
 or working tree contents.
@@ -414,9 +321,6 @@ Before moving anything, rename updates
 .B parent
 in each active child, restoring it if the directory move fails.
 A resumed rename updates any children that still name the old workspace.
-Forest does not tell the attach command about the rename, so a later
-.B attach
-under the new name may open the workspace a second time.
 .TP
 .BI archive " workspace [\-\-force]"
 Remove every clean registered worktree in a workspace with
@@ -453,13 +357,12 @@ Repeating a successful archive reports it as already archived while no new
 active workspace exists, selecting the newest generation or the legacy archive
 if it is the only one.
 .IP
-Archives are excluded from the active workspace list, the launcher, active
-workspace completion, and
+Archives are excluded from the active workspace list, active workspace
+completion, and
 .BR path ;
 use
 .B list \-\-archived
 to see them.
-Forest does not close anything the attach command opened.
 The archive is local dormant storage, not a compressed archive or backup.
 .TP
 .BI unarchive " workspace [checkout ...] [\-\-archive ID] [\-\-as workspace]"
@@ -643,7 +546,7 @@ Completion honors normal configuration discovery,
 .BR FOREST_CONFIG ,
 and
 .BR \-\-config .
-It never contacts remotes, mutates worktrees, or runs the attach command.
+It never contacts remotes or mutates worktrees.
 Invalid or missing configuration produces no configuration-dependent
 candidates.
 .SH CONFIGURATION
@@ -665,9 +568,6 @@ members = [
 [workspaces]
 root = "src/.workspaces"
 branch = "user/{checkout}"
-
-[attach]
-command = ["desk", "attach", "\-\-plan", "\-"]
 .EE
 .PP
 The file is the one named by
@@ -709,17 +609,6 @@ or
 is the workspace name.
 .B {checkout}
 is the slot of a named checkout and the workspace name for a primary checkout.
-.TP
-.B attach.command
-The program, then its arguments, that
-.B attach
-runs to open workspaces.
-It is required by
-.B attach
-and the launcher; the
-.B [attach]
-table is otherwise optional.
-The program must not be empty.
 .PP
 Unknown placeholders, duplicate members, absolute roots, and unsupported
 configuration versions are rejected.
@@ -737,18 +626,17 @@ It has lower precedence than
 .BR \-\-config .
 .TP
 .B NO_COLOR
-Disable colored human-readable output, including in the launcher.
+Disable colored human-readable output.
 .TP
 .B PATH
-Used to find Git and the program named by
-.BR attach.command .
+Used to find Git.
 .SH EXIT STATUS
 .TP
 .B 0
 Success, including fully idempotent operations.
 .TP
 .B 1
-An operational conflict or a Git, attach command, or filesystem failure.
+An operational conflict or a Git or filesystem failure.
 .TP
 .B 2
 A usage, input, or configuration error.
